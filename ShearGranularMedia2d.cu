@@ -76,11 +76,11 @@ struct Parameters {
   // real shearRate = 0.1; // shear rate for Lees-Edwards BC  
   // real strainrate = 2.0; // speed of the bottom "plate"
 
-  int Nsteps = 395978;
-  // int Nsteps = 100000;
-  // int Nsteps = 2;
+  // int Nsteps = 395978;
   // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
   int Nwrite = 1584; // Steps required for plate particle to travel its size 
+  int Nsteps = 20 * Nwrite;
+
 };
 
 // I like to place these basic UAMMD objects in a struct so it is easy to pass
