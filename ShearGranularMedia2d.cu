@@ -37,11 +37,11 @@ using namespace uammd;
 // time being, lets simply hardcode some values
 // Later, we will see how to read these parameters from a file.
 struct Parameters {
-  int numberParticles = 286;
-  int movingParticles = 15; 
+  int numberParticles = 271;
+  int movingParticles = 0; 
   int stationaryParticles = 15; 
   int interiorParticles = numberParticles - movingParticles - stationaryParticles;
-  real3 boxSize = make_real3(38.01401138305664, 42.782547, 1.0); // Size of the box in each direction
+  real3 boxSize = make_real3(38.01401138305664, 70.0, 1.0); // Size of the box in each direction
 
   real mass = 0.001; // Mass of the particles (Stokes number is small ~ O(10^-2))
   real viscosity = 1.0 / (6 * M_PI);
@@ -62,12 +62,13 @@ struct Parameters {
   // real kt = 15.0;
   // real kt = 10.0;
   real kn = 1.0; 
-  real k = 100.0; // Spring constant for the harmonic well
+  real k = 1000.0; // Spring constant for the harmonic well
   // real kn = 3.5 * kt;
   // real k = 3.5 * kt;
   real mu = 0.25; // Coefficient of friction
   real gamma_n = 0.25; // Damping coefficient for normal direction
-  real gamma_t = 0.5; // Damping coefficient for tangential direction
+  real gamma_t = 0.25; // Damping coefficient for tangential direction
+  real3 fext = make_real3(mass*0.7071, -mass*0.7071, 0.0); // External force on interior particles
   // real gamma_n = 0.005;
   bool is2D = true;
   // real3 Kx = make_real3(0.0, 0.0, 0.0); // shear flow in x-direction whose gradient lies along y
@@ -87,6 +88,30 @@ struct UAMMD {
   std::shared_ptr<ParticleData> pd;
   std::shared_ptr<Integrator> integrator;
   Parameters par;
+};
+
+struct ExternalForceField: public ParameterUpdatable {
+    real3 fext; // external force
+    real time;
+
+    ExternalForceField(real3 fext=make_real3(1.0, 0.0, 0.0)):
+        fext(fext), time(0) { }
+
+    __device__ ForceEnergyVirial sum(Interactor::Computables comp,
+                                     const real &radii){
+        // real3 f = {fext, 0.0, 0.0};
+        real energy = comp.energy ? 0: 0; 
+        real virial = comp.virial ? 0: 0; 
+
+        return {fext, energy, virial};
+    }
+
+    auto getArrays(ParticleData *pd) {
+        return std::make_tuple();
+    }
+
+    virtual void updateSimulationTime(real newTime) override { time = newTime; }
+
 };
 
 struct MovingHarmonicField: public ParameterUpdatable {
@@ -366,6 +391,12 @@ auto vector_from_pd_positions(UAMMD sim) {
   auto pos = sim.pd->getPos(access::cpu, access::read);
   auto pos_by_id = thrust::make_permutation_iterator(pos.begin(), id2index);
   return std::vector<real4>(pos_by_id, pos_by_id + pos.size());
+}
+
+auto createExternalForceInteractor(UAMMD sim, std::shared_ptr<ParticleGroup> pg, real3 fext=make_real3(1.0, 0.0, 0.0)) {
+  auto forceField = std::make_shared<ExternalForceField>(fext);
+  auto ext = std::make_shared<ExternalForces<ExternalForceField>>(pg, forceField);
+  return ext;
 }
 
 auto createExternalPotentialInteractor(UAMMD sim, std::shared_ptr<ParticleGroup> pg, real moving=1.0) {
@@ -873,25 +904,59 @@ int main(int argc, char *argv[]) {
   }
 
   // Hold the particles in the trap using particle groups
-  auto idrange = std::vector<int>(sim.par.movingParticles); std::iota(idrange.begin(), idrange.end(), 0);
-  auto pg = std::make_shared<ParticleGroup>(idrange.begin(), idrange.end(), sim.pd, "MovingPlate");
+  if(sim.par.movingParticles){
+    auto idrange = std::vector<int>(sim.par.movingParticles); std::iota(idrange.begin(), idrange.end(), 0);
+    auto pg = std::make_shared<ParticleGroup>(idrange.begin(), idrange.end(), sim.pd, "MovingPlate");
 
-  auto idrange2 = std::vector<int>(sim.par.stationaryParticles); std::iota(idrange2.begin(), idrange2.end(), sim.par.movingParticles);
-  auto pg2 = std::make_shared<ParticleGroup>(idrange2.begin(), idrange2.end(), sim.pd, "StationaryPlate");
+    if(sim.par.k){
+      auto ext = createExternalPotentialInteractor(sim, pg, 0.0);
+      ext->sum({.force=true, .energy=false, .virial=false});
+      nd->addInteractor(ext);
+    }
+  }
+
+  if(sim.par.stationaryParticles){
+    auto idrange2 = std::vector<int>(sim.par.stationaryParticles); std::iota(idrange2.begin(), idrange2.end(), sim.par.movingParticles);
+    auto pg2 = std::make_shared<ParticleGroup>(idrange2.begin(), idrange2.end(), sim.pd, "StationaryPlate");
+
+    if(sim.par.k){
+      auto ext2 = createExternalPotentialInteractor(sim, pg2, 0.0);
+      ext2->sum({.force=true, .energy=false, .virial=false});
+      nd->addInteractor(ext2);
+    }
+  }
+
+  // Apply a constant external force on the remaining particles (interior of the plates)
+  auto idrange3 = std::vector<int>(sim.par.interiorParticles); std::iota(idrange3.begin(), idrange3.end(), sim.par.movingParticles + sim.par.stationaryParticles);
+  auto pg3 = std::make_shared<ParticleGroup>(idrange3.begin(), idrange3.end(), sim.pd, "InteriorParticles");
 
   // sim.integrator = bd;
   // Enable the external potential 
-  if (sim.par.k != 0){
-    auto ext = createExternalPotentialInteractor(sim, pg, 1.0);
-    ext->sum({.force=true, .energy=false, .virial=false});
-    nd->addInteractor(ext);
-    std::cout << "MovingPlate enabled" << std::endl;
+  // if (sim.par.k != 0){
 
-    auto ext2 = createExternalPotentialInteractor(sim, pg2, 0.0);
-    ext2->sum({.force=true, .energy=false, .virial=false});
-    nd->addInteractor(ext2);
-    std::cout << "StationaryPlate enabled" << std::endl;
-  }
+  //   if(sim.par.movingParticles){
+  //     auto ext = createExternalPotentialInteractor(sim, pg, 1.0);
+  //     ext->sum({.force=true, .energy=false, .virial=false});
+  //     nd->addInteractor(ext);
+  //     std::cout << "MovingPlate enabled" << std::endl;
+  //   }
+  //   if(sim.par.stationaryParticles){
+  //     auto ext = createExternalPotentialInteractor(sim, pg2, 0.0);
+  //     ext->sum({.force=true, .energy=false, .virial=false});
+  //     nd->addInteractor(ext);
+  //     std::cout << "StationaryPlate enabled" << std::endl;
+  //   }
+
+  //   // auto ext2 = createExternalPotentialInteractor(sim, pg2, 0.0);
+  //   // ext2->sum({.force=true, .energy=false, .virial=false});
+  //   // nd->addInteractor(ext2);
+  //   // std::cout << "StationaryPlate enabled" << std::endl;
+  // }
+
+  auto constant_force = createExternalForceInteractor(sim, pg3, sim.par.fext);
+  constant_force->sum({.force=true, .energy=false, .virial=false});
+  nd->addInteractor(constant_force);
+  std::cout << "Constant external force enabled." << std::endl;
 
   auto inter = std::make_shared<CustomContactInteractor>(sim);
   nd->addInteractor(inter);
