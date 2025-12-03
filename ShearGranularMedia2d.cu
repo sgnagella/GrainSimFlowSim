@@ -26,6 +26,7 @@
 #include <fstream>
 #include <random>
 // #include "external.cuh" // Our external potential
+#include <thrust/remove.h>
 #include <thrust/transform_reduce.h>
 #include <utils/vector.cuh>
 #include <utils/InitialConditions.cuh>
@@ -519,15 +520,84 @@ __device__ real3 total_contact_force_ij(
 struct ContactManager {
   ContactHistory* contacts;         // Array of contact histories
   int* contact_count;               // Number of active contacts
+  int Ncleanup = 1000;              // Cleanup interval
   int max_contacts;                 // Maximum contacts we can store
-  int cutoff_age;                   // Age after which contact is removed
+  float cutoff_age;                   // Age after which contact is removed
 
-  ContactManager(int max_size) : max_contacts(max_size), cutoff_age(10) {
+  struct HashEntry{
+  uint32_t key; 
+  int index;
+  };
+
+  HashEntry* hash_table; 
+  int hash_size; 
+
+  ContactManager(int max_size) : max_contacts(max_size), cutoff_age(25.0) {
     cudaMalloc(&contacts, max_contacts * sizeof(ContactHistory));
     cudaMalloc(&contact_count, sizeof(int));
     cudaMemset(contact_count, 0, sizeof(int));
+
+    hash_size = 8192; 
+    cudaMalloc(&hash_table, hash_size * sizeof(HashEntry));
+    HashEntry empty_entry = {0xFFFFFFFF, -1};
+
+    // Initialize with empty markers
+    for(int i=0; i<hash_size; i++){
+      cudaMemcpy(&hash_table[i], &empty_entry, sizeof(HashEntry), 
+                  cudaMemcpyHostToDevice);
+    }
+
   }
   
+  // Hash function
+  __device__ uint32_t hash(uint32_t key){
+    // Multiplicative hash 
+    key = key + 2654435761u;
+    return key & (hash_size - 1);  // Modulo by power of 2
+  }
+
+  // Pack two particle IDs into one key
+  __device__ uint32_t pack_key(int i, int j) {
+      int min_id = min(i, j);
+      int max_id = max(i, j);
+      // Assumes particle IDs < 65536 (16 bits each)
+      return (min_id << 16) | max_id;
+  }
+
+  __device__ ContactHistory* getContact_v1(int i, int j){
+    uint32_t key = pack_key(i,j); 
+    uint32_t slot = hash(key); 
+
+    for(int probe = 0; probe < hash_size; probe++){
+      uint32_t current_slot = (slot + probe) & (hash_size -1);
+      if (hash_table[current_slot].key == key){
+        // Found a contact
+        int idx = hash_table[current_slot].index;
+        contacts[idx].is_active = true; 
+        return &contacts[idx];
+      }
+      if (hash_table[current_slot].key == 0xFFFFFFFF) {
+            // Empty slot - need to create new contact
+            // For now, keep it simple with atomics
+            int new_idx = atomicAdd(contact_count, 1);
+            if (new_idx < max_contacts) {
+                // Create contact
+                contacts[new_idx] = ContactHistory(min(i,j), max(i,j));
+                
+                // Add to hash table
+                hash_table[current_slot].key = key;
+                hash_table[current_slot].index = new_idx;
+                
+                return &contacts[new_idx];
+            }
+            return nullptr;  // Table full
+        }
+    }
+    // Hash table full
+    printf("Hash table full for key %u!\n", key);
+    return nullptr;
+  }
+
   ~ContactManager() {
     cudaFree(contacts);
     cudaFree(contact_count);
@@ -539,6 +609,7 @@ struct ContactManager {
     int max_id = max(i, j);
     
     // Search for existing contact
+    
     for (int idx = 0; idx < *contact_count; idx++) {
       if (contacts[idx].particle_i == min_id && 
           contacts[idx].particle_j == max_id) {
@@ -557,7 +628,28 @@ struct ContactManager {
     
     return nullptr; // No space for new contact
   }
+
+  // struct is_inactive{
+  //   int current_time;
+  //   __host__ __device__
+  //   bool operator()(const ContactHistory& contact){
+  //     return !contact.is_active || ((current_time - contact.contact_age) > cutoff_age);
+  //   }
+  // };
   
+  // void __device__ cleanupContacts(float time){
+  //   if(time%Ncleanup != 0) return; // Only cleanup every Ncleanup steps
+  //   thrust::device_ptr<ContactHistory> d_begin(contacts);
+  //   thrust::device_ptr<ContactHistory> d_end = d_begin + (*contact_count);
+
+  //   // Remove inactive contacts
+  //   auto new_end = thrust::remove(d_begin, d_end, is_inactive{time});
+    
+  //   // Update contact count
+  //   int new_count = thrust::distance(d_begin, new_end);
+  //   cudaMemcpy(contact_count, &new_count, sizeof(int), cudaMemcpyHostToDevice);
+  // }
+
   // Mark all contacts as inactive before processing timestep
   // NOTE: CUDA __global__ kernels cannot be member functions. The kernel is
   // defined as a free function below and a host helper can launch it.
@@ -651,10 +743,9 @@ __global__ void processNeighboursContacts(
       if (r2 < radii_sum2) {
         // printf("Particle %d interacting with %d\n", gli, j);
         // Particles are in contact - get or create contact history
-        ContactHistory *contact = contact_mgr->getContact(gli, j);
         // printf("Contact age before update: %d\n", contact->contact_age);
         // Check for existing contact history and update
-
+        ContactHistory *contact = contact_mgr->getContact_v1(gli, j);
         if(contact->contact_time > 0){
           // printf("Existing contact between %d and %d found with age %d\n", contact->particle_i, contact->particle_j, contact->contact_age);
 
@@ -806,6 +897,10 @@ public:
   }
 
   virtual void updateSimulationTime(real newTime) override { time = newTime; }
+  // void cleanupContacts(){
+  //   // Launch kernel to compact active contacts
+  //   contact_mgr->cleanupContacts(time);
+  // }
   void sum(Computables comp, cudaStream_t st) override {
     Box box(boxSize);
     nl->update(box, rcut, st);
@@ -962,6 +1057,9 @@ int main(int argc, char *argv[]) {
         writeSimulation(sim);
 
       }
+
+      // Clean up old contacts every Ncleanup steps
+      // inter->cleanupContacts();
   }
 
   // Destroy the UAMMD environment and exit
