@@ -67,7 +67,8 @@ struct Parameters {
   // real k = 3.5 * kt;
   real mu = 0.25; // Coefficient of friction
   real gamma_n = 0.25; // Damping coefficient for normal direction
-  real gamma_t = 0.5; // Damping coefficient for tangential direction
+  real gamma_t = 0.25; // Damping coefficient for tangential direction
+  real3 fext = make_real3(0.01, 0.0, 0.0); // External force on interior particles
   // real gamma_n = 0.005;
   bool is2D = true;
   // real3 Kx = make_real3(0.0, 0.0, 0.0); // shear flow in x-direction whose gradient lies along y
@@ -87,6 +88,29 @@ struct UAMMD {
   std::shared_ptr<ParticleData> pd;
   std::shared_ptr<Integrator> integrator;
   Parameters par;
+};
+
+struct ExternalForceField: public ParameterUpdatable {
+    real3 fext; // external force magnitude
+    real time;
+
+    ExternalForceField(real3 fext=make_real3(1.0, 0.0, 0.0)):
+        fext(fext), time(0) { }
+
+    __device__ ForceEnergyVirial sum(Interactor::Computables comp){
+        // real3 f = {fext, 0.0, 0.0};
+        real energy = comp.energy ? 0: 0; 
+        real virial = comp.virial ? 0: 0; 
+
+        return {fext, energy, virial};
+    }
+
+    auto getArrays(ParticleData *pd) {
+        return std::make_tuple();
+    }
+
+    virtual void updateSimulationTime(real newTime) override { time = newTime; }
+
 };
 
 struct MovingHarmonicField: public ParameterUpdatable {
@@ -366,6 +390,12 @@ auto vector_from_pd_positions(UAMMD sim) {
   auto pos = sim.pd->getPos(access::cpu, access::read);
   auto pos_by_id = thrust::make_permutation_iterator(pos.begin(), id2index);
   return std::vector<real4>(pos_by_id, pos_by_id + pos.size());
+}
+
+auto createExternalForceInteractor(UAMMD sim, std::shared_ptr<ParticleGroup> pg, real3 fext=make_real3(1.0, 0.0, 0.0)) {
+  auto forceField = std::make_shared<ExternalForceField>(fext);
+  auto ext = std::make_shared<ExternalForces<ExternalForceField>>(pg, forceField);
+  return ext;
 }
 
 auto createExternalPotentialInteractor(UAMMD sim, std::shared_ptr<ParticleGroup> pg, real moving=1.0) {
@@ -879,19 +909,28 @@ int main(int argc, char *argv[]) {
   auto idrange2 = std::vector<int>(sim.par.stationaryParticles); std::iota(idrange2.begin(), idrange2.end(), sim.par.movingParticles);
   auto pg2 = std::make_shared<ParticleGroup>(idrange2.begin(), idrange2.end(), sim.pd, "StationaryPlate");
 
+  // Apply a constant external force on the remaining particles (interior of the plates)
+  auto idrange3 = std::vector<int>(sim.par.interiorParticles); std::iota(idrange3.begin(), idrange3.end(), sim.par.movingParticles + sim.par.stationaryParticles);
+  auto pg3 = std::make_shared<ParticleGroup>(idrange3.begin(), idrange3.end(), sim.pd, "InteriorParticles");
+
   // sim.integrator = bd;
   // Enable the external potential 
   if (sim.par.k != 0){
-    auto ext = createExternalPotentialInteractor(sim, pg, 1.0);
+    auto ext = createExternalPotentialInteractor(sim, pg, 0.0);
     ext->sum({.force=true, .energy=false, .virial=false});
     nd->addInteractor(ext);
-    std::cout << "MovingPlate enabled" << std::endl;
+    std::cout << "StationaryPlate enabled" << std::endl;
 
     auto ext2 = createExternalPotentialInteractor(sim, pg2, 0.0);
     ext2->sum({.force=true, .energy=false, .virial=false});
     nd->addInteractor(ext2);
     std::cout << "StationaryPlate enabled" << std::endl;
   }
+
+  auto constant_force = createExternalForceInteractor(sim, pg3, sim.par.fext);
+  constant_force->sum({.force=true, .energy=false, .virial=false});
+  nd->addInteractor(constant_force);
+  std::cout << "Constant external force enabled." << std::endl;
 
   auto inter = std::make_shared<CustomContactInteractor>(sim);
   nd->addInteractor(inter);
