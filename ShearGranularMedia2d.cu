@@ -26,11 +26,22 @@
 #include <fstream>
 #include <random>
 // #include "external.cuh" // Our external potential
+// #include <cuco/static_map.cuh>
+// #include <cuco/dynamic_map.cuh>
+#include <cuda/functional>
+#include <cuda/std/tuple>
+#include <thrust/detail/raw_reference_cast.h>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
 #include <thrust/remove.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
+#include <thrust/device_ptr.h>
 #include <thrust/transform_reduce.h>
 #include <utils/vector.cuh>
 #include <utils/InitialConditions.cuh>
 
+#include "hasher/hasher.cuh"
 // #include "SimUtils.cuh"
 using namespace uammd;
 
@@ -79,7 +90,7 @@ struct Parameters {
   // int Nsteps = 395978;
   // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
   int Nwrite = 1584; // Steps required for plate particle to travel its size 
-  int Nsteps = 20 * Nwrite;
+  int Nsteps = 200 * Nwrite;
 
 };
 
@@ -524,84 +535,168 @@ struct ContactManager {
   int max_contacts;                 // Maximum contacts we can store
   float cutoff_age;                   // Age after which contact is removed
 
-  struct HashEntry{
-  uint32_t key; 
-  int index;
+  // Hash table for O(1) lookup
+  static constexpr uint32_t EMPTY_KEY = 0xFFFFFFFF;
+  static constexpr unsigned long long EMPTY_PACKED = 0xFFFFFFFFFFFFFFFFull;
+  static constexpr int MAX_PROBES = 64; 
+  using u64 = unsigned long long;
+  struct HashEntry {
+  // Upper 32 bits: key (packed (i,j))
+  // Lower 32 bits: index into contacts[]
+    u64 packed;
   };
 
   HashEntry* hash_table; 
   int hash_size; 
 
-  ContactManager(int max_size) : max_contacts(max_size), cutoff_age(25.0) {
+  // Constructor
+  ContactManager(int num_particles) : cutoff_age(25.0) {
+    // Estimate the max size of the hash table as ~6x number of particles
+    // int expected_contacts = 6 * num_particles;
+    max_contacts = 16 * num_particles; // Allow some extra space
+
     cudaMalloc(&contacts, max_contacts * sizeof(ContactHistory));
     cudaMalloc(&contact_count, sizeof(int));
     cudaMemset(contact_count, 0, sizeof(int));
 
-    hash_size = 8192; 
-    cudaMalloc(&hash_table, hash_size * sizeof(HashEntry));
-    HashEntry empty_entry = {0xFFFFFFFF, -1};
-
-    // Initialize with empty markers
-    for(int i=0; i<hash_size; i++){
-      cudaMemcpy(&hash_table[i], &empty_entry, sizeof(HashEntry), 
-                  cudaMemcpyHostToDevice);
+    // Initialize hash table (2x number of contacts for 50% load factor)
+    hash_size = 1;
+    while(hash_size < max_contacts * 2){
+      hash_size *= 2;
     }
 
+    cudaMalloc(&hash_table, hash_size * sizeof(HashEntry));
+    // HashEntry empty_entry = {EMPTY_KEY, -1};
+
+    // Initialize with empty markers
+    cudaMemset(hash_table, 0xFF, hash_size * sizeof(HashEntry));
+    // for(int i=0; i<hash_size; i++){
+    //   cudaMemcpy(&hash_table[i], &empty_entry, sizeof(HashEntry), 
+    //               cudaMemcpyHostToDevice);
+    // }
+    printf("ContactManager initialized: max_contacts=%d, hash_size=%d\n", 
+               max_contacts, hash_size);
+    
   }
-  
-  // Hash function
-  __device__ uint32_t hash(uint32_t key){
-    // Multiplicative hash 
-    key = key + 2654435761u;
-    return key & (hash_size - 1);  // Modulo by power of 2
+  // Destructor
+  ~ContactManager() {
+    cudaFree(contacts);
+    cudaFree(contact_count);
+    cudaFree(hash_table);
+  }
+
+  __device__ __forceinline__ u64 pack_entry(uint32_t key, int index) {
+    // high 32 bits = key
+    u64 hi = static_cast<u64>(key) << 32;
+
+    // low 32 bits = index (assumes index >= 0)
+    u64 lo = static_cast<unsigned int>(index);
+
+    return hi | lo;
+  }
+
+  __device__ __forceinline__ uint32_t unpack_key(unsigned long long packed) {
+    return uint32_t(packed >> 32);
+  }
+
+  __device__ __forceinline__ int unpack_index(unsigned long long packed) {
+    return int(packed & 0xFFFFFFFFu);
   }
 
   // Pack two particle IDs into one key
   __device__ uint32_t pack_key(int i, int j) {
-      int min_id = min(i, j);
-      int max_id = max(i, j);
-      // Assumes particle IDs < 65536 (16 bits each)
-      return (min_id << 16) | max_id;
+    // Ensure consistent ordering
+    uint16_t min_id = min(i, j);
+    uint16_t max_id = max(i, j);
+    // Assumes particle IDs < 65536 (16 bits each)
+    return (uint32_t(min_id) << 16) | max_id;
   }
 
-  __device__ ContactHistory* getContact_v1(int i, int j){
-    uint32_t key = pack_key(i,j); 
-    uint32_t slot = hash(key); 
+  // Hash function
+  __device__ uint32_t hash(uint32_t key){
+    // MurmurHash3 finalizer
+    key ^= key >> 16;
+    key *= 0x85ebca6b;
+    key ^= key >> 13;
+    key *= 0xc2b2ae35;
+    key ^= key >> 16;
+    return key & (hash_size - 1);
+  }
 
-    for(int probe = 0; probe < hash_size; probe++){
-      uint32_t current_slot = (slot + probe) & (hash_size -1);
-      if (hash_table[current_slot].key == key){
-        // Found a contact
-        int idx = hash_table[current_slot].index;
-        contacts[idx].is_active = true; 
+  // Main function: Find existing contact or create a new one
+  __device__ ContactHistory* getContact_v1(int i, int j) {
+    uint32_t key  = pack_key(i, j);
+    uint32_t slot = hash(key);
+
+    // Reserve a contact index up-front
+    int my_idx = atomicAdd(contact_count, 1);
+    if (my_idx >= max_contacts) {
+      atomicSub(contact_count, 1);  // Undo
+      printf("ContactManager full! max_contacts=%d\n", max_contacts);
+      return nullptr;
+    }
+
+    // Linear probe to find or insert
+    for (int probe = 0; probe < MAX_PROBES; ++probe) {
+      uint32_t current_slot = (slot + probe) & (hash_size - 1);
+      HashEntry* entry = &hash_table[current_slot];
+
+      // Snapshot current packed value
+      unsigned long long cur = entry->packed;
+      uint32_t cur_key = unpack_key(cur);
+
+      // Case 1: found existing contact with this key
+      if (cur_key == key) {
+        // We don't need the new index we reserved
+        atomicSub(contact_count, 1);
+
+        int idx = unpack_index(cur);
+        contacts[idx].is_active = true;
         return &contacts[idx];
       }
-      if (hash_table[current_slot].key == 0xFFFFFFFF) {
-            // Empty slot - need to create new contact
-            // For now, keep it simple with atomics
-            int new_idx = atomicAdd(contact_count, 1);
-            if (new_idx < max_contacts) {
-                // Create contact
-                contacts[new_idx] = ContactHistory(min(i,j), max(i,j));
-                
-                // Add to hash table
-                hash_table[current_slot].key = key;
-                hash_table[current_slot].index = new_idx;
-                
-                return &contacts[new_idx];
-            }
-            return nullptr;  // Table full
+
+      // Case 2: empty slot, try to claim it
+      if (cur == EMPTY_PACKED) {
+        unsigned long long desired = pack_entry(key, my_idx);
+
+        // Try to install (key,index) atomically
+        unsigned long long old = atomicCAS(&entry->packed, EMPTY_PACKED, desired);
+
+        if (old == EMPTY_PACKED) {
+          // We successfully inserted this contact
+          contacts[my_idx] = ContactHistory(i, j);
+          contacts[my_idx].is_active = true;
+          return &contacts[my_idx];
         }
+
+        // Another thread beat us to this slot
+        uint32_t old_key = unpack_key(old);
+        if (old_key == key) {
+          // Another thread inserted the same contact
+          atomicSub(contact_count, 1);  // give back our unused index
+          int idx = unpack_index(old);
+          contacts[idx].is_active = true;
+          return &contacts[idx];
+        }
+
+        // Otherwise, different key grabbed this slot; continue probing
+        continue;
+      }
+
+      // Case 3: occupied by a different key, keep probing
     }
-    // Hash table full
-    printf("Hash table full for key %u!\n", key);
+
+    // Failed to insert or find after MAX_PROBES
+    atomicSub(contact_count, 1);  // release reserved index
+    printf("ContactManager hash table full or too many collisions!\n");
     return nullptr;
   }
 
-  ~ContactManager() {
-    cudaFree(contacts);
-    cudaFree(contact_count);
-  }
+
+  // ~ContactManager() {
+  //   cudaFree(contacts);
+  //   cudaFree(contact_count);
+  // }
   
   // Find existing contact or create new one
   __device__ ContactHistory* getContact(int i, int j) {
@@ -664,6 +759,184 @@ struct ContactManager {
   // Remove inactive contacts (call from host)
   // void cleanupContacts() 
 };
+
+
+// struct ContactManager {
+//   ContactHistory* contacts;         // Array of contact histories
+//   int* contact_count;               // Number of active contacts
+//   int Ncleanup = 1000;              // Cleanup interval
+//   int max_contacts;                 // Maximum contacts we can store
+//   float cutoff_age;                   // Age after which contact is removed
+
+//   // Hash table for O(1) lookup
+//   static constexpr uint32_t EMPTY_KEY = 0xFFFFFFFF;
+//   static constexpr int MAX_PROBES = 64; 
+
+//   unsigned long long* hash_table;
+//   int hash_size; 
+
+//   // Constructor
+//   ContactManager(int num_particles) : cutoff_age(25.0) {
+//     // Estimate the max size of the hash table as ~6x number of particles
+//     int expected_contacts = 6 * num_particles;
+//     max_contacts = expected_contacts * 2; // Allow some extra space
+
+//     cudaMalloc(&contacts, max_contacts * sizeof(ContactHistory));
+//     cudaMalloc(&contact_count, sizeof(int));
+//     cudaMemset(contact_count, 0, sizeof(int));
+
+//     // Initialize hash table (2x number of contacts for 50% load factor)
+//     hash_size = 1;
+//     while(hash_size < max_contacts){
+//       hash_size *= 2;
+//     }
+
+//     cudaMalloc(&hash_table, hash_size * sizeof(unsigned long long));
+//     // HashEntry empty_entry = {EMPTY_KEY, -1};
+
+//     // Initialize with empty markers
+//     for(int i=0; i<hash_size; i++){
+//       cudaMemcpy(&hash_table[i], &EMPTY_KEY, sizeof(unsigned long long), 
+//                   cudaMemcpyHostToDevice);
+//     }
+//     printf("ContactManager initialized: max_contacts=%d, hash_size=%d\n", 
+//                max_contacts, hash_size);
+//   }
+//   // Destructor
+//   ~ContactManager() {
+//     cudaFree(contacts);
+//     cudaFree(contact_count);
+//     cudaFree(hash_table);
+//   }
+
+//   // Pack two particle IDs into one key
+//   __device__ uint32_t pack_key(int i, int j) {
+//     // Ensure consistent ordering
+//     uint16_t min_id = min(i, j);
+//     uint16_t max_id = max(i, j);
+//     // Assumes particle IDs < 65536 (16 bits each)
+//     return (uint32_t(min_id) << 16) | max_id;
+//   }
+
+//   // Hash function
+//   __device__ uint32_t hash(uint32_t key){
+//     // MurmurHash3 finalizer
+//     key ^= key >> 16;
+//     key *= 0x85ebca6b;
+//     key ^= key >> 13;
+//     key *= 0xc2b2ae35;
+//     key ^= key >> 16;
+//     return key & (hash_size - 1);
+//   }
+
+//   // Main function: Find existing contact or create a new one
+//   __device__ ContactHistory* getContact_v1(int i, int j){
+//     uint32_t key = pack_key(i,j); 
+//     uint32_t slot = hash(key); 
+
+//     // CHANGE: Allocate contact index BEFORE trying to claim slot
+//     int my_idx = atomicAdd(contact_count, 1);
+//     if (my_idx >= max_contacts) {
+//         atomicSub(contact_count, 1);  // Undo
+//         return nullptr;
+//     }
+//     // Prepare empty value (do this outside the loop)
+//     unsigned long long empty_value = 
+//         (unsigned long long)(EMPTY_KEY) << 32 | 0xFFFFFFFFULL;
+
+//     // Linear probe to find or insert 
+//     for(int probe = 0; probe < MAX_PROBES; probe++){
+//       uint32_t current_slot = (slot + probe) & (hash_size -1);
+
+//       unsigned long long current = hash_table[current_slot];
+//       uint32_t stored_key = (uint32_t)(current >> 32);
+//       int32_t stored_idx = (int32_t)(current & 0xFFFFFFFFULL);
+
+//       if (stored_key == key) {
+//         // Found it - index is guaranteed valid
+//         contacts[stored_idx].is_active = true;
+//         return &contacts[stored_idx];
+//       }
+
+//       if (stored_key == EMPTY_KEY){
+//         // Allocate contact first
+//         int new_idx = atomicAdd(contact_count, 1);
+//         if(new_idx >= max_contacts){
+//           atomicSub(contact_count, 1); // Undo
+//           return nullptr;
+//         }
+
+//         // Create new contact
+//         contacts[new_idx] = ContactHistory(i, j);
+
+//         // Prepare new entry value
+//         unsigned long long new_entry = 
+//             ((unsigned long long)key << 32) | (unsigned long long)new_idx;
+
+//         // Correct atomicCAS syntax for 64-bit
+//         unsigned long long old = atomicCAS(
+//             (unsigned long long*)&hash_table[current_slot],
+//             empty_value,
+//             new_entry
+//         );
+
+//         if (old == empty_value) {
+//           // Success!
+//           return &contacts[new_idx];
+      
+//         } else {
+//           // Failed - undo allocation
+//           atomicSub(contact_count, 1);
+
+//           // Check if it's our key
+//           uint32_t old_key = (uint32_t)(old >> 32);
+//           if (old_key == key) {
+//             int32_t idx = (int32_t)(old & 0xFFFFFFFFULL);
+//             contacts[idx].is_active = true;
+//             return &contacts[idx];
+//           }
+//           // Otherwise continue probing
+//         }
+//       }
+//     }
+//     return nullptr;
+//   }
+
+//   // struct is_inactive{
+//   //   int current_time;
+//   //   __host__ __device__
+//   //   bool operator()(const ContactHistory& contact){
+//   //     return !contact.is_active || ((current_time - contact.contact_age) > cutoff_age);
+//   //   }
+//   // };
+  
+//   // void __device__ cleanupContacts(float time){
+//   //   if(time%Ncleanup != 0) return; // Only cleanup every Ncleanup steps
+//   //   thrust::device_ptr<ContactHistory> d_begin(contacts);
+//   //   thrust::device_ptr<ContactHistory> d_end = d_begin + (*contact_count);
+
+//   //   // Remove inactive contacts
+//   //   auto new_end = thrust::remove(d_begin, d_end, is_inactive{time});
+    
+//   //   // Update contact count
+//   //   int new_count = thrust::distance(d_begin, new_end);
+//   //   cudaMemcpy(contact_count, &new_count, sizeof(int), cudaMemcpyHostToDevice);
+//   // }
+
+//   // Mark all contacts as inactive before processing timestep
+//   // NOTE: CUDA __global__ kernels cannot be member functions. The kernel is
+//   // defined as a free function below and a host helper can launch it.
+  
+//   // Remove inactive contacts (call from host)
+//   // void cleanupContacts() {
+//   //   // Launch kernel to compact active contacts
+//   //   // (Implementation would use thrust::remove_if or custom compaction)
+//   // }
+
+//   // TODO: Remove inactive contacts 
+//   // Remove inactive contacts (call from host)
+//   // void cleanupContacts() 
+// };
 
 
 // A new way of using a neighbour list
@@ -746,6 +1019,7 @@ __global__ void processNeighboursContacts(
         // printf("Contact age before update: %d\n", contact->contact_age);
         // Check for existing contact history and update
         ContactHistory *contact = contact_mgr->getContact_v1(gli, j);
+        // ContactHistory *contact = contact_mgr->getContact(gli, j);
         if(contact->contact_time > 0){
           // printf("Existing contact between %d and %d found with age %d\n", contact->particle_i, contact->particle_j, contact->contact_age);
 
@@ -872,8 +1146,8 @@ public:
      {
       nl = std::make_shared<CellList>(sim.pd);
       // Initialize contact manager with estimated max contacts
-      int max_contacts = numberParticles * 1000;  // Estimate 10 contacts per particle
-      contact_mgr = std::make_shared<ContactManager>(max_contacts);
+      // int max_contacts = numberParticles * 1000;  // Estimate 10 contacts per particle
+      contact_mgr = std::make_shared<ContactManager>(numberParticles);
       // create device copy of contact manager
       cudaError_t err = cudaMalloc((void**)&d_contact_mgr, sizeof(ContactManager));
       if (err != cudaSuccess) {
@@ -955,7 +1229,6 @@ public:
     processNeighboursContacts<decltype(ni)><<<numberParticles / 128 + 1, 128, 0, st>>>(
         ni, time, Nwrite, numberParticles, box, radius, vel, ang_vel, force, torque, energy, virial, stress_x, stress_y, stress_z,
         dt, kn, kt, mu, gamma_n, gamma_t, d_contact_mgr);
-
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(err));
@@ -1027,10 +1300,29 @@ int main(int argc, char *argv[]) {
   nd->addInteractor(constant_force);
   std::cout << "Constant external force enabled." << std::endl;
 
+  //   // Hasher initialization 
+  // std::size_t num_entries = 8 * sim.par.numberParticles;
+  // using KeyType = int; 
+  // using ValueType = int;
+  // auto constexpr empty_key_sentinel = -1;
+  // auto constexpr empty_value_sentinel = -1;
+
+  // // Allocate a map with ~50% load factor.
+  // // auto map =
+  // // cuco::static_map{cuco::extent<std::size_t>{num_entries},
+  // //                   cuco::empty_key{empty_key},
+  // //                   cuco::empty_value{empty_value},
+  // //                   heterogeneous_key_equal{},
+  // //                   cuco::linear_probing<1, heterogeneous_hasher>{heterogeneous_hasher{}}};
+
+  // cuco::dynamic_map<KeyType,ValueType> map{num_entries, 
+  //                              cuco::empty_key{empty_key_sentinel},
+  //                              cuco::empty_value{empty_value_sentinel}};
+
   auto inter = std::make_shared<CustomContactInteractor>(sim);
   nd->addInteractor(inter);
   std::cout << "Contacts interactor enabled." << std::endl;
-
+  
   // if (sim.par.k != 0){
   //   // Add external torques on boundary particles to cancel out induced rotations 
   //   // from interactions
@@ -1048,6 +1340,7 @@ int main(int argc, char *argv[]) {
   // int Nsteps = 2;
   // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
   // int Nwrite = 1584; // Steps required for plate particle to travel its size 
+  // exit(0);
   for( int step = 0; step < sim.par.Nsteps; step++){
       nd->forwardTime();
       std::cout << "Step " << step << " done." << std::endl;
