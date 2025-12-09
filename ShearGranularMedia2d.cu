@@ -28,8 +28,8 @@
 // #include "external.cuh" // Our external potential
 // #include <cuco/static_map.cuh>
 // #include <cuco/dynamic_map.cuh>
-#include <cuda/functional>
-#include <cuda/std/tuple>
+// #include <cuda/functional>
+// #include <cuda/std/tuple>
 #include <thrust/detail/raw_reference_cast.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
