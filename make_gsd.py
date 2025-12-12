@@ -111,7 +111,7 @@ if __name__ == "__main__":
     Nparticles = 286
     platePaticles = 15
     dt = 0.0008; 0.001
-    Nsteps = int(395978/1584)
+    Nsteps = int(200*1584/1584)
     # Nsteps = int(312500/1250)
     # Nsteps = int(100000/1250)
     particle_groups = {"A": [0]*(platePaticles), "B": [1]*(platePaticles), "C": [2]*(Nparticles - 2*platePaticles)} ;  {"A": [0]*(Nparticles//2), "B": [1]*(Nparticles//2)}; {"A":[0]*Nparticles}; 

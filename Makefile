@@ -8,7 +8,7 @@ CXX=g++
 
 CUDA_ROOT=$(shell dirname `which nvcc`)/..
 CUCO_ROOT=/home/snagella/Software/cuCollections
-UAMMD_ROOT=../../GrainSim
+UAMMD_ROOT=../../../GrainSimTorquesv2
 #Uncomment to compile in double precision mode
 #DOUBLE_PRECISION=-DDOUBLE_PRECISION
 INCLUDEFLAGS=-I$(CUDA_ROOT)/include -I$(UAMMD_ROOT)/src -I$(UAMMD_ROOT)/src/third_party
