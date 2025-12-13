@@ -49,11 +49,11 @@ using namespace uammd;
 // time being, lets simply hardcode some values
 // Later, we will see how to read these parameters from a file.
 struct Parameters {
-  int numberParticles = 286;
-  int movingParticles = 15; 
-  int stationaryParticles = 15; 
+  int numberParticles = 862;
+  int movingParticles = 31; 
+  int stationaryParticles = 31; 
   int interiorParticles = numberParticles - movingParticles - stationaryParticles;
-  real3 boxSize = make_real3(38.01401138305664, 42.782547, 1.0); // Size of the box in each direction
+  real3 boxSize = make_real3(66.89543914794922, 70.91128, 1.0); // Size of the box in each direction
 
   real mass = 0.001; // Mass of the particles (Stokes number is small ~ O(10^-2))
   real viscosity = 1.0 / (6 * M_PI);
@@ -90,7 +90,7 @@ struct Parameters {
   // int Nsteps = 395978;
   // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
   int Nwrite = 1584; // Steps required for plate particle to travel its size 
-  int Nsteps = 200 * Nwrite;
+  int Nsteps = 500 * Nwrite;
 
 };
 
@@ -551,9 +551,8 @@ struct ContactManager {
 
   // Constructor
   ContactManager(int num_particles) : cutoff_age(25.0) {
-    // Estimate the max size of the hash table as ~6x number of particles
     // int expected_contacts = 6 * num_particles;
-    max_contacts = 16 * num_particles; // Allow some extra space
+    max_contacts = 50 * num_particles; // Allow some extra space
 
     cudaMalloc(&contacts, max_contacts * sizeof(ContactHistory));
     cudaMalloc(&contact_count, sizeof(int));
