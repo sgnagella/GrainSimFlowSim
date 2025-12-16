@@ -108,8 +108,8 @@ if __name__ == "__main__":
     dat_file ="particles3.dat"; "particles2.dat"; "particles.dat"
     radii_file = "input/radii.dat"
     box = [66.89543914794922, 70.91128, 0.0]
-    Nparticles = 862
-    platePaticles = 31
+    Nparticles = 5156
+    platePaticles = 78
     dt = 0.0008; 0.001
     Nwrite = 1250; 1584
     Nsteps = int(500*Nwrite/Nwrite)

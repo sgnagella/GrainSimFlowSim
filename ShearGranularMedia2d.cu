@@ -51,11 +51,11 @@ using namespace uammd;
 // time being, lets simply hardcode some values
 // Later, we will see how to read these parameters from a file.
 struct Parameters {
-  int numberParticles = 862;
-  int movingParticles = 31; 
-  int stationaryParticles = 31; 
+  int numberParticles = 5156;
+  int movingParticles = 78; 
+  int stationaryParticles = 78; 
   int interiorParticles = numberParticles - movingParticles - stationaryParticles;
-  real3 boxSize = make_real3(66.89543914794922, 70.91128, 1.0); // Size of the box in each direction
+  real3 boxSize = make_real3(157.14303588867188, 160.87233, 1.0); // Size of the box in each direction
 
   real mass = 0.001; // Mass of the particles (Stokes number is small ~ O(10^-2))
   real viscosity = 1.0 / (6 * M_PI);
@@ -96,7 +96,7 @@ struct Parameters {
   // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
   int Nwrite = 1250; // Steps required for plate particle to travel its size 
   // int Nwrite = 1;
-  int Nsteps = 500 * Nwrite;
+  int Nsteps = 250 * Nwrite;
   // int Nsteps = 1 * Nwrite;
 
 };
