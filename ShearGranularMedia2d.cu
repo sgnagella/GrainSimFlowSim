@@ -38,6 +38,7 @@
 // #include <thrust/iterator/counting_iterator.h>
 // #include <thrust/iterator/transform_iterator.h>
 #include <thrust/device_ptr.h>
+#include <thrust/distance.h>
 // #include <thrust/transform_reduce.h>
 #include <utils/vector.cuh>
 #include <utils/InitialConditions.cuh>
@@ -50,11 +51,11 @@ using namespace uammd;
 // time being, lets simply hardcode some values
 // Later, we will see how to read these parameters from a file.
 struct Parameters {
-  int numberParticles = 286;
-  int movingParticles = 15; 
-  int stationaryParticles = 15; 
+  int numberParticles = 862;
+  int movingParticles = 31; 
+  int stationaryParticles = 31; 
   int interiorParticles = numberParticles - movingParticles - stationaryParticles;
-  real3 boxSize = make_real3(38.01401138305664, 42.782547, 1.0); // Size of the box in each direction
+  real3 boxSize = make_real3(66.89543914794922, 70.91128, 1.0); // Size of the box in each direction
 
   real mass = 0.001; // Mass of the particles (Stokes number is small ~ O(10^-2))
   real viscosity = 1.0 / (6 * M_PI);
@@ -71,16 +72,19 @@ struct Parameters {
   // real kn = 5.0; // Normal spring constant for overlap force
   // real kn = 3.5; 
   // real kt = 1.0; // Tangential spring constant for overlap force
-  real kt = 0.5;
+  real kt = (2./7.);
+  // real kt = 0.0;
   // real kt = 15.0;
   // real kt = 10.0;
   real kn = 1.0; 
   real k = 100.0; // Spring constant for the harmonic well
   // real kn = 3.5 * kt;
   // real k = 3.5 * kt;
-  real mu = 0.25; // Coefficient of friction
-  real gamma_n = 0.005; // Damping coefficient for normal direction
-  real gamma_t = 0.25; // Damping coefficient for tangential direction
+  real mu = 0.33; // Coefficient of friction
+  real gamma_n = 0.25; // Damping coefficient for normal direction
+  // real gamma_n = 0.0;
+  real gamma_t = 0.25; // Deamping coefficient for tangential direction
+  // real gamma_t = 0.0;
   real3 fext = make_real3(0.01, 0.0, 0.0); // External force on interior particles
   // real gamma_n = 0.005;
   bool is2D = true;
@@ -90,7 +94,8 @@ struct Parameters {
 
   // int Nsteps = 395978;
   // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
-  int Nwrite = 1584; // Steps required for plate particle to travel its size 
+  int Nwrite = 1250; // Steps required for plate particle to travel its size 
+  // int Nwrite = 1;
   int Nsteps = 500 * Nwrite;
   // int Nsteps = 1 * Nwrite;
 
@@ -448,9 +453,9 @@ __device__ real3 overlap_force_ij(real kn, real3 rij, real radius_sum){
 __device__ real3 damping_force_ij(real gamma, real3 vij, real3 rij, bool isNormal){
     if( gamma == 0.0 ) return make_real3(0.0, 0.0, 0.0);
     if( isNormal ){
-        return -gamma * normal_component(vij, rij);
+        return gamma * normal_component(vij, rij);
     }
-    return -gamma * tangential_component(vij, rij);
+    return gamma * tangential_component(vij, rij);
 }
 
 __device__ real3 normal_frictional_force_ij(real gamma_n, real3 vij, real3 rij){
@@ -476,14 +481,15 @@ __device__ real3 tangential_frictional_force_ij(real kt, real3 &xi, real mu, rea
     // real ft_magnitude = length(static_force_ij(kt, xi));
     real fn_magnitude = length(fn); 
     if( ft_magnitude > mu * fn_magnitude ){
-        // Set xi max
-        xi = ( mu * fn_magnitude/ ft_magnitude ) * xi;
+      // Set xi max
+      xi = ( mu * fn_magnitude/ ft_magnitude ) * xi; // normalizes xi (tangent)
     }
     return static_force_ij(kt, xi); 
 }
 
 __device__ real3 compute_stress_i(real3 rij, real3 fij){
     // Stress contribution from a pairwise interaction
+    // printf("rij: %f, %f, %f | fij: %f, %f, %f\n", rij.x, rij.y, rij.z, fij.x, fij.y, fij.z);
     return make_real3( rij.x * fij.x, rij.y * fij.y, rij.z * fij.z );
 }
 
@@ -518,16 +524,60 @@ __device__ real3 total_contact_force_ij(
         real3 fn = overlap_force_ij(kn, rij, radius_sum); 
         // printf("Normal overlap force: %f, %f, %f\n", fn.x, fn.y, fn.z);
         // fn += normal_frictional_force_ij(gamma_n, vij, rij);
-        fn += damping_force_ij(gamma_n, vij, rij, true);
+        fn -= damping_force_ij(gamma_n, vij, rij, true);
         // printf("Normal frictional force: %f, %f, %f\n", fn.x, fn.y, fn.z);
         // Update tangential displacement xi
         real3 ft = tangential_frictional_force_ij(kt, contact->xi, mu, fn);
-        ft += damping_force_ij(gamma_t, vij, rij, false);
+        ft -= damping_force_ij(gamma_t, vij, rij, false);
         // printf("tangential frictional force: %f, %f, %f\n\n", ft.x, ft.y, ft.z);
         // real3 ft = make_real3(0,0,0);
         return fn + ft; 
       }
       return make_real3(0,0,0);
+}
+
+__device__ void compute_contact_forces(
+    real kn, real kt, 
+    real gamma_n, 
+    real gamma_t,
+    real mu, real3 rij, real3 vij, 
+    ContactHistory* contact, real radius_sum, real3 &fn, real3 &fdiss){
+    // Modifies fn and fdiss by reference
+      if(( contact != nullptr) && ( contact->is_active)){
+        fn = overlap_force_ij(kn, rij, radius_sum);
+        fdiss = -damping_force_ij(gamma_n, vij, rij, true);
+        fdiss += -damping_force_ij(gamma_t, vij, rij, false);
+        fdiss += tangential_frictional_force_ij(kt, contact->xi, mu, fn);
+      }
+      return;
+}
+
+// __device__ real3 compute_stress_ij(
+//   real3 rij, real3 force, bool dissipative=false){
+//   // if(dissipative){
+//   //   return 0.5 * ( compute_stress_i(rij, force) + compute_stress_i(force, rij) );
+//   // }
+//   // return compute_stress_i(rij, force);
+//   // }
+
+//   return 0.5 * ( compute_stress_i(rij, force) + compute_stress_i(force, rij) );
+// }
+
+__device__ real3 compute_stress_ij(
+  real3 rij, real3 force, int idx){
+  if(idx > 2){ printf("Error: stress index out of bounds\n"); return make_real3(0.0, 0.0, 0.0); }
+  if(idx==0){
+    return 0.5 * ( compute_stress_i(make_real3(rij.x), force) + 
+                   compute_stress_i(make_real3(force.x), rij) );
+  }
+  if(idx==1){
+    return 0.5 * ( compute_stress_i(make_real3(rij.y), force) + 
+                   compute_stress_i(make_real3(force.y), rij) );
+  }
+  if(idx==2){
+    return 0.5 * ( compute_stress_i(make_real3(rij.z), force) + 
+                   compute_stress_i(make_real3(force.z), rij) );
+  }
 }
 
 struct ContactManager {
@@ -542,7 +592,7 @@ struct ContactManager {
   // Hash table for O(1) lookup
   static constexpr uint32_t EMPTY_KEY = 0xFFFFFFFF;
   static constexpr unsigned long long EMPTY_PACKED = 0xFFFFFFFFFFFFFFFFull;
-  static constexpr int MAX_PROBES = 64; 
+  static constexpr int MAX_PROBES = 256; 
   using u64 = unsigned long long;
   struct HashEntry {
   // Upper 32 bits: key (packed (i,j))
@@ -557,7 +607,7 @@ struct ContactManager {
   ContactManager(int num_particles) : cutoff_age(25.0) {
     // Estimate the max size of the hash table as ~6x number of particles
     // int expected_contacts = 6 * num_particles;
-    max_contacts = 10 * num_particles; // Allow some extra space
+    max_contacts = 50 * num_particles; // Allow some extra space
 
     cudaMalloc(&contacts, max_contacts * sizeof(ContactHistory));
     cudaMalloc(&contact_count, sizeof(int));
@@ -650,6 +700,7 @@ struct ContactManager {
 
   // Main function: Find existing contact or create a new one
   __device__ ContactHistory* getContact_v1(int i, int j) {
+    // printf("getContact_v1 called for (%d, %d)\n", i, j);
     uint32_t key  = pack_key(i, j);
     uint32_t slot = hash(key);
 
@@ -686,40 +737,6 @@ struct ContactManager {
         return &contacts[idx];
         // return returnContact(idx);
       }
-
-      // Case 2: empty slot, try to claim it
-      // if (cur == EMPTY_PACKED) {
-      //   // This could be a previously cleared slot, so
-      //   // first try to install our (key,index)
-      //   for(auto try_index: {unpack_index(cur), my_idx}){
-      //     unsigned long long desired = pack_entry(key, try_index);
-          
-      //     // Try to install (key,index) atomically
-      //     unsigned long long old = atomicCAS(&entry->packed, EMPTY_PACKED, desired);
-
-      //     if (old == EMPTY_PACKED) {
-      //       // We successfully inserted this contact
-      //       contacts[try_index] = ContactHistory(i, j);
-      //       contacts[try_index].is_active = true;
-      //       if(try_index == unpack_index(cur)){
-      //         // We didn't use our reserved index
-      //         atomicSub(contact_count, 1);
-      //       }
-      //       return &contacts[try_index];
-      //     }
-
-      //     uint32_t old_key = unpack_key(old);
-      //     if (old_key == key) {
-      //       // Another thread inserted the same contact
-      //       atomicSub(contact_count, 1);  // give back our unused index
-      //       int idx = unpack_index(old);
-      //       contacts[idx].is_active = true;
-      //       return &contacts[idx];
-      //     }
-      //   } 
-      //   // Otherwise, different key grabbed this slot; continue probing
-      //   continue;
-      // }
 
       // Case 2: empty slot, try to claim it
       if (cur == EMPTY_PACKED) {
@@ -1057,9 +1074,9 @@ __global__ void processNeighboursContacts(
       make_real3(cub::ThreadLoad<cub::LOAD_LDG>(ni.getSortedPositions() + i));
   real3 f = real3();
   real3 t = real3();
-  real3 sx = real3();
-  real3 sy = real3();
-  real3 sz = real3();
+  // real3 sx = real3();
+  // real3 sy = real3();
+  // real3 sz = real3();
   real e = 0;
   real v = 0; 
   // for(auto neigh: ni){ //This is equivalent to the while loop, although a tad
@@ -1073,37 +1090,38 @@ __global__ void processNeighboursContacts(
   const real3 vi = vel[gli];
   const real3 avi = make_real3(ang_vel[gli]);
   const real ri = radius[gli];
+  int nneigh;
   // bool writeStep = ( ((time+1) % Nwrite) == 0 );
-  int nneigh = 0;
   while (it) { // it will cast to false when there are no more neighbours
-    nneigh++;
     auto neigh = *it++; // The iterator can only be advanced and dereferenced
+    nneigh = 0;
     int j = neigh.getGroupIndex();
+    const real3 pj = make_real3(neigh.getPos());
+    const real3 vj = vel[j];
     if (j == gli)
       continue; // Skip self-interaction
-    if (gli < j){ // Process each pair only once
-      // const int glj = neigh.getGroupIndexes()[j];
-      const real3 vj = vel[j];
-      const real3 vij = vi - vj; // TODO: Account for PBCs in homogeneous shear flow using Lees-Edwards
-      const real3 pj = make_real3(neigh.getPos());
-      const real3 rij = box.apply_pbc(pj - pi);
-      const real r2 = dot(rij, rij);
-      const real3 avij = ri * avi + radius[j] * make_real3(ang_vel[j]);
-      const real radii_sum = ri + radius[j];
-      // printf("Processing contact between %d and %d: rij = %f, %f, %f, r2 = %f, radii_sum = %f\n", gli, j, rij.x, rij.y, rij.z, r2, radii_sum);
-      const real radii_sum2 = radii_sum * radii_sum;
-      if (r2 > 0 and r2 < (real(6.25))) {
-        
-        // TODO: reset the contact history if contact breaks using contact age
-        // TODO: Account for different particle sizes here 
-        // r2 < (Ri + Rj)^2
-        // For now assume all particles have diameter 2 -> (1+1)^2 = 4
+    // const int glj = neigh.getGroupIndexes()[j];
+    const real3 vij = vi - vj; // TODO: Account for PBCs in homogeneous shear flow using Lees-Edwards
+    const real3 rij = box.apply_pbc(pj - pi);
+    const real r2 = dot(rij, rij);
+    const real3 avij = ri * avi + radius[j] * make_real3(ang_vel[j]);
+    const real radii_sum = ri + radius[j];
+    // printf("Processing contact between %d and %d: rij = %f, %f, %f, r2 = %f, radii_sum = %f\n", gli, j, rij.x, rij.y, rij.z, r2, radii_sum);
+    const real radii_sum2 = radii_sum * radii_sum;
+    if (r2 > 0 and r2 < (real(6.25))) {
+      
+      // TODO: reset the contact history if contact breaks using contact age
+      // TODO: Account for different particle sizes here 
+      // r2 < (Ri + Rj)^2
+      // For now assume all particles have diameter 2 -> (1+1)^2 = 4
 
-        if (r2 < radii_sum2) {
-          // printf("Time: %f In block %d, thread %d: Particle %d interacting with %d\n", time, blockIdx.x, threadIdx.x, gli, j);
-          // Particles are in contact - get or create contact history
-          // printf("Contact age before update: %d\n", contact->contact_age);
-          // Check for existing contact history and update
+      if (r2 < radii_sum2) {
+        nneigh++;
+        // printf("Time: %f In block %d, thread %d: Particle %d interacting with %d\n", time, blockIdx.x, threadIdx.x, gli, j);
+        // Particles are in contact - get or create contact history
+        // printf("Contact age before update: %d\n", contact->contact_age);
+        // Check for existing contact history and 
+        if (gli < j){
           ContactHistory *contact = contact_mgr->getContact_v1(gli, j);
           // printf("Retrieved contact for (%d, %d): age=%f at time %f \n", gli, j, contact->contact_age, time);
           // ContactHistory *contact = contact_mgr->getContact(gli, j);
@@ -1133,7 +1151,8 @@ __global__ void processNeighboursContacts(
           // printf("Continuing contact between %d and %d\n", contact->particle_i, contact->particle_j);
           contact->contact_time += dt; // +1/2 for each particle in the pair during counting
           // printf("Contact time between %d and %d is now %f \n", contact->particle_i, contact->particle_j, contact->contact_time);
-          contact->xi += (gli > j ? real(1) : real(-1) ) * ( (vij - normal_component(vij, rij)) + cross_product_2D( avij, rij*rsqrt(dot(rij,rij)) ) ) * dt; 
+          contact->xi += tangential_component(vij, rij) * dt;
+          // contact->xi += (gli > j ? real(1) : real(-1) ) * ( (vij - normal_component(vij, rij)) + cross_product_2D( avij, rij*rsqrt(dot(rij,rij)) ) ) * dt; 
           // contact->xi += (gli > j ? real(1) : real(-1) ) * 0.5 * ( (vij - normal_component(vij, rij)) ) * dt; 
           // printf("Updated xi between %d and %d is %10f, %10f, %10f\n", contact->particle_i, contact->particle_j, contact->xi.x, contact->xi.y, contact->xi.z);
     
@@ -1143,6 +1162,34 @@ __global__ void processNeighboursContacts(
           const real3 fmod = (force or virial) ? total_contact_force_ij(kn, kt, gamma_n, gamma_t, mu, dt, rij, vij, contact, radii_sum) : real3();
           const real3 tmod = (torque) ? ri * static_torque_ij_2D(fmod, rij) : real3();
 
+          // const real3 foverlap = overlap_force_ij(kn, rij, radii_sum);
+
+          // real3 fel = real3();
+          // real3 fdiss = real3();
+          // compute_contact_forces(kn, kt, gamma_n, gamma_t, mu, rij, vij, contact, radii_sum, fel, fdiss);
+          // real3 sx = (stress_x) ? compute_stress_ij(make_real3(rij.x), fel): real3();
+          // sx += (stress_x) ? compute_stress_ij(make_real3(rij.x), fdiss, true): real3();
+
+          // real3 sy = (stress_y) ? compute_stress_ij(make_real3(rij.y), fel): real3();
+          // sy += (stress_y) ? compute_stress_ij(make_real3(rij.y), fdiss, true): real3();
+
+          // real3 sz = (stress_z) ? compute_stress_ij(make_real3(rij.z), fel): real3();
+          // sz += (stress_z) ? compute_stress_ij(make_real3(rij.z), fdiss, true): real3();  
+
+          const real3 sx = (stress_x) ? 0.5 * compute_stress_ij(rij, fmod, 0): real3();
+          const real3 sy = (stress_y) ? 0.5 * compute_stress_ij(rij, fmod, 1): real3();
+          const real3 sz = (stress_z) ? 0.5 * compute_stress_ij(rij, fmod, 2): real3();
+
+          // const real3 sy = (stress_y) ? compute_stress_ij(make_real3(rij.y), fmod): real3();
+          // const real3 sz = (stress_z) ? compute_stress_ij(make_real3(rij.z), fmod): real3();
+
+          // const real3 sx = (stress_x) ? compute_stress_i(make_real3(rij.x), foverlap): real3();
+          // const real3 sy = (stress_y) ? compute_stress_i(make_real3(rij.y), foverlap): real3();
+          // const real3 sz = (stress_z) ? compute_stress_i(make_real3(rij.z), foverlap): real3();
+
+          // printf("Components of sx for particles %d and %d: %f, %f, %f\n", gli, j, sx.x, sx.y, sx.z);
+          // printf("Components of sy for particles %d and %d: %f, %f, %f\n", gli, j, sy.x, sy.y, sy.z);
+          
           // printf("Force between %d and %d is %f, %f, %f\n\n", contact->particle_i, contact->particle_j, fmod.x, fmod.y, fmod.z);
           if (force){
             // f += fmod;
@@ -1154,30 +1201,59 @@ __global__ void processNeighboursContacts(
             atomicAdd(&force[j].x, -fmod.x);
             atomicAdd(&force[j].y, -fmod.y);
             atomicAdd(&force[j].z, -fmod.z);
+
+            
           }
           if (torque){
             // printf("Torque between %d and %d is %f, %f, %f\n\n", contact->particle_i, contact->particle_j, tmod.x, tmod.y, tmod.z);
             t += tmod;
           } 
           if (stress_x){
-            sx += compute_stress_i(make_real3(rij.x), fmod);
+            // sx += compute_stress_i(make_real3(rij.x), fmod);
+            // sx = compute_stress_i(make_real3(rij.x), fmod);
+            // printf("Components of sx for particles %d and %d: %f, %f, %f\n", gli, j, sx.x, sx.y, sx.z);
+            atomicAdd(&stress_x[gli].x, sx.x); // split equally between the two particles in the pair
+            atomicAdd(&stress_x[gli].y, sx.y);
+            atomicAdd(&stress_x[gli].z, sx.z);
+
+            atomicAdd(&stress_x[j].x, sx.x);
+            atomicAdd(&stress_x[j].y, sx.y);
+            atomicAdd(&stress_x[j].z, sx.z);
           }
           if (stress_y){
-            sy += compute_stress_i(make_real3(rij.y), fmod);
+            // sy += compute_stress_i(make_real3(rij.y), fmod);
+            // sy = compute_stress_i(make_real3(rij.y), fmod);
+            // printf("Components of sy for particles %d and %d: %f, %f, %f\n", gli, j, sy.x, sy.y, sy.z);
+            atomicAdd(&stress_y[gli].x, sy.x);
+            atomicAdd(&stress_y[gli].y, sy.y);
+            atomicAdd(&stress_y[gli].z, sy.z);
+
+            atomicAdd(&stress_y[j].x, sy.x);
+            atomicAdd(&stress_y[j].y, sy.y);
+            atomicAdd(&stress_y[j].z, sy.z);
           }
           if (stress_z){
-            sz += compute_stress_i(make_real3(rij.z), fmod);
+            // sz += compute_stress_i(make_real3(rij.z), fmod);
+            // sz = compute_stress_i(make_real3(rij.z), fmod);
+            // printf("Components of sz for particles %d and %d: %f, %f, %f\n", gli, j, sz.x, sz.y, sz.z);
+            atomicAdd(&stress_z[gli].x, sz.x);
+            atomicAdd(&stress_z[gli].y, sz.y);
+            atomicAdd(&stress_z[gli].z, sz.z);
+
+            atomicAdd(&stress_z[j].x, sz.x);
+            atomicAdd(&stress_z[j].y, sz.y);
+            atomicAdd(&stress_z[j].z, sz.z);
+
           }
           // if (energy)
           //   e += lj_energy(r2);
           // if (virial)
           //   v += dot(fmod, rij);
 
-        } // overlap check
-
-      } // r2 vicinity check
-    } // gli < j check
-  } // while neighbours
+        } // gli < j check
+      } // overlap check 
+    } // r2 vicinity check
+  } // while neighbours  
 
   if (force){
     // force[gli] += make_real4(f);
@@ -1186,13 +1262,16 @@ __global__ void processNeighboursContacts(
     // printf("Total torque on particle %d: %f, %f, %f\n", gli, t.x, t.y, t.z);
   }
   if (stress_x){
-    stress_x[gli] += (nneigh > 0) ? sx / nneigh : real3();
+    // stress_x[gli] += (nneigh > 0) ? sx / nneigh : real3();
+    // stress_x[gli] /=  (nneigh > 0) ? nneigh : real(1.0);
   }
   if (stress_y){
-    stress_y[gli] += (nneigh > 0) ? sy / nneigh : real3();
+    // stress_y[gli] += (nneigh > 0) ? sy / nneigh : real3();
+    // stress_y[gli] /= (nneigh > 0) ? nneigh : real(1.0);
   }
   if (stress_z){
-    stress_z[gli] += (nneigh > 0) ? sz / nneigh : real3();
+    // stress_z[gli] += (nneigh > 0) ? sz / nneigh : real3();
+    // stress_z[gli] /= (nneigh > 0) ? nneigh : real(1.0);
   }
   if (torque)
     torque[gli] += make_real4(t);
@@ -1209,13 +1288,14 @@ __global__ void gpu_print_debug(){
 
 __global__ void gpu_cleanupContacts(
   ContactManager *contact_mgr, // Contact history manager
+  ContactManager::HashEntry *hash_table, // Hash table to update
   real time){
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= contact_mgr->max_contacts) return;
-
-  ContactManager::HashEntry *hash_table = contact_mgr->hash_table;
-  int MAX_PROBES = ContactManager::MAX_PROBES;
-  int hash_size = contact_mgr->hash_size;
+  // printf("ContactManager pointer: %p\n", contact_mgr);
+  // ContactManager::HashEntry *hash_table = contact_mgr->hash_table;
+  const int MAX_PROBES = ContactManager::MAX_PROBES;
+  const int hash_size = contact_mgr->hash_size;
   // ContactHistory *contacts = contact_mgr->contacts; 
   ContactHistory *contact = &contact_mgr->contacts[idx];
   const int i = contact->particle_i;
@@ -1244,7 +1324,6 @@ __global__ void gpu_cleanupContacts(
         // Found existing contact with this key
         // Avoid race condition by checking whether the entry is already empty
         if (cur_key == key and entry->packed != ContactManager::EMPTY_PACKED){
-        // if (cur_key == key){
           entry->packed = ContactManager::EMPTY_PACKED;
           // A new active contact will occupy this empty slot
           // printf("Cleaning up contact between %d and %d at index %d\n", i, j, idx); 
@@ -1258,15 +1337,16 @@ __global__ void gpu_cleanupContacts(
 }
 
 __global__ void gpu_rebuildHashTable(
-  ContactManager *contact_mgr // Contact history manager
+  ContactManager *contact_mgr, // Contact history manager
+  ContactManager::HashEntry *hash_table // Hash table to rebuild
   ){
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= contact_mgr->max_contacts) return;
 
-  using HashEntry = ContactManager::HashEntry;
-  HashEntry *hash_table = contact_mgr->hash_table;
-  int MAX_PROBES = ContactManager::MAX_PROBES;
-  int hash_size = contact_mgr->hash_size;
+  // using HashEntry = ContactManager::HashEntry;
+  // HashEntry *hash_table = contact_mgr->hash_table;
+  const int MAX_PROBES = ContactManager::MAX_PROBES;
+  const int hash_size = contact_mgr->hash_size;
   ContactHistory *contacts = contact_mgr->contacts; 
   ContactHistory *contact = &contacts[idx];
   const int i = contact->particle_i;
@@ -1280,7 +1360,7 @@ __global__ void gpu_rebuildHashTable(
   // Linear probe to find or insert 
   for(int probe = 0; probe < MAX_PROBES; probe++){
     uint32_t current_slot = (slot + probe) & (hash_size -1);
-    HashEntry* entry = &hash_table[current_slot];
+    ContactManager::HashEntry* entry = &hash_table[current_slot];
     unsigned long long cur = entry->packed;
 
     if (cur == ContactManager::EMPTY_PACKED){
@@ -1306,6 +1386,7 @@ __global__ void gpu_rebuildHashTable(
       }
     }
   }
+  printf("In GPU Rebuild: ContactManager hash table full or too many collisions!\n");
   return;
 }
 
@@ -1320,7 +1401,7 @@ class CustomContactInteractor : public ParameterUpdatable, public Interactor {
   ContactManager *d_contact_mgr = nullptr; // Device pointer to contact manager
   real dt;
   real time = 0;
-  int steps;
+  long long steps;
   int Nwrite;
   real rcut; 
   real3 boxSize;
@@ -1330,7 +1411,7 @@ class CustomContactInteractor : public ParameterUpdatable, public Interactor {
   real mu; // Coefficient of friction
   real gamma_n; // Damping coefficient for normal direction
   real gamma_t; // Damping coefficient for tangential direction
-  int cleanup_interval = 15000; // Interval for cleaning inactive contacts
+  int cleanup_interval = 5000; // Interval for cleaning inactive contacts
 
 public: 
   CustomContactInteractor( UAMMD sim ) : 
@@ -1387,7 +1468,8 @@ public:
     // }
 
     gpu_rebuildHashTable<<<contact_mgr->max_contacts / 128 + 1, 128, 0, st>>>(
-        d_contact_mgr
+        d_contact_mgr,
+        contact_mgr->hash_table
     );
     err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -1406,30 +1488,33 @@ public:
     // Periodically clean up inactive contacts 
     steps = (time/dt)+1;
     if ( (steps % cleanup_interval) == 0){
-      cudaError_t err;      
       int h_count = 0; 
       cudaMemcpy(&h_count, contact_mgr->contact_count, sizeof(int), cudaMemcpyDeviceToHost);
       std::cout << "Starting contact cleanup at time " << time << " with " << h_count << " contacts." << std::endl;
       // fprintf(stdout, "Cleaning up inactive contacts at time %f (step %d)\n", time, steps);
-      gpu_cleanupContacts<<<contact_mgr->max_contacts / 128 + 1, 128, 0, st>>>(d_contact_mgr, time-dt);
-      // gpu_print_debug<<<1,1,0,st>>>();
-      err = cudaGetLastError();
+      gpu_cleanupContacts<<<contact_mgr->max_contacts / 128 + 1, 128, 0, st>>>(d_contact_mgr, contact_mgr->hash_table, time-dt);
+      cudaError_t err = cudaGetLastError();
       if (err != cudaSuccess) {
-        fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(err));
-        exit(1);
+          fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(err));
       }
       err = cudaDeviceSynchronize();
       if (err != cudaSuccess) {
-        fprintf(stderr, "Device sync failed after kernel: %s\n", cudaGetErrorString(err));
-        exit(1);
+          fprintf(stderr, "Device sync failed after kernel: %s\n", cudaGetErrorString(err));
+          // Optional: exit or raise error so program stops near the failing kernel
+          exit(1);
       }
 
       // Print number of cleaned contacts
-      cudaMemcpy(&h_count, contact_mgr->cleanup_count, sizeof(int), cudaMemcpyDeviceToHost);
-      std::cout << "Cleaned up " << h_count << " inactive contacts at time " << time << std::endl;
+      // cudaMemcpy(&h_count, contact_mgr->cleanup_count, sizeof(int), cudaMemcpyDeviceToHost);
+      // std::cout << "Cleaned up " << h_count << " inactive contacts at time " << time << std::endl;
+
+      int cleaned;
+      cudaMemcpy(&cleaned, contact_mgr->cleanup_count, sizeof(int), cudaMemcpyDeviceToHost);
+      std::cout << "Marked " << cleaned << " contacts as inactive" << std::endl;
+
       // Reset cleanup count
-      int zero = 0;
-      cudaMemcpy(contact_mgr->cleanup_count, &zero, sizeof(int), cudaMemcpyHostToDevice);
+      // int zero = 0;
+      // cudaMemcpy(contact_mgr->cleanup_count, &zero, sizeof(int), cudaMemcpyHostToDevice);
 
       // Copy contact data back to host for compaction
       // cudaMemcpy(contact_mgr->contacts, d_contact_mgr->contacts, 
@@ -1440,45 +1525,76 @@ public:
       //            cudaMemcpyDeviceToHost);
 
       std::cout << "Compacting contacts array after cleanup..." << std::endl;
+      thrust::device_ptr<ContactHistory> d_begin(contact_mgr->contacts);
+      thrust::device_ptr<ContactHistory> d_end = d_begin + contact_mgr->max_contacts;  
       // Compact the contacts array to remove inactive contacts
-      thrust::remove_if(
-        thrust::device, 
-        contact_mgr->contacts, 
-        contact_mgr->contacts + ((contact_mgr->max_contacts)), 
-        [] __device__ (const ContactHistory& contact) { return !contact.is_active; }
-      );
+      // auto new_end = thrust::remove_if(
+      //   thrust::device,
+      //   contact_mgr->contacts,
+      //   contact_mgr->contacts + cleaned,
+      //   [] __device__ (const ContactHistory& contact) { return !contact.is_active; }
+      // );
 
+      auto new_end = thrust::partition(
+        // thrust::device,
+        d_begin,
+        d_end,
+        [] __device__ (const ContactHistory& contact) { return contact.is_active; }
+      );
       std::cout << "Compaction complete." << std::endl;
       // Obtain new contact count by summing over active contacts
-      int new_count = thrust::count_if(
-          thrust::device, 
-          contact_mgr->contacts, 
-          contact_mgr->contacts + ((contact_mgr->max_contacts)), 
-          [] __device__ (const ContactHistory& contact) { return contact.is_active; }
-        );
+      int new_count = thrust::distance(d_begin, new_end);
+      std::cout << "After compaction: " << new_count << " active contacts (removed " 
+                << (h_count - new_count) << ")" << std::endl;
+
+      // int new_count = thrust::count_if(
+      //     thrust::device, 
+      //     contact_mgr->contacts, 
+      //     contact_mgr->contacts + ((contact_mgr->max_contacts)), 
+      //     [] __device__ (const ContactHistory& contact) { return contact.is_active; }
+      //   );
       // cudaMemcpy(contact_mgr->contact_count, &new_count, sizeof(int), cudaMemcpyHostToDevice);
-      std::cout << "Updated contact count after compaction: " << new_count << std::endl;
+      // std::cout << "Updated contact count after compaction: " << new_count << std::endl;
+
+      // Step 4: Update contact count
+      cudaMemcpy(contact_mgr->contact_count, &new_count, sizeof(int), 
+      cudaMemcpyHostToDevice);
+
+      // Reset cleanup counter
+      cudaMemset(contact_mgr->cleanup_count, 0, sizeof(int));
 
       // Copy updated contact data back to device
       // cudaMemcpy(d_contact_mgr->contacts, contact_mgr->contacts, 
       //            contact_mgr->max_contacts * sizeof(ContactHistory), 
       //            cudaMemcpyHostToDevice);
-      cudaMemcpy(contact_mgr->contact_count, &new_count, 
-                 sizeof(int), 
-                 cudaMemcpyHostToDevice); 
-
-      std::cout << "Rebuilding hash table after cleanup..." << std::endl;
-      h_rebuildHashTable(st);
+      // cudaMemcpy(contact_mgr->contact_count, &new_count, sizeof(int), cudaMemcpyHostToDevice);
+      
+      int blocks = (contact_mgr->max_contacts + 127) / 128;  // Only process active contacts
+      std::cout << "Rebuilding hash table for " << new_count << " contacts..." << std::endl;
+      
+      gpu_rebuildHashTable<<<blocks, 128, 0, st>>>(d_contact_mgr, contact_mgr->hash_table);
+      
+      err = cudaGetLastError();
+      if (err != cudaSuccess) {
+          fprintf(stderr, "Rebuild kernel failed: %s\n", cudaGetErrorString(err));
+          exit(1);
+      }
+      cudaStreamSynchronize(st);
+    
+      std::cout << "Cleanup complete.\n" << std::endl;
+      // std::cout << "Rebuilding hash table after cleanup..." << std::endl;
+      // h_rebuildHashTable(st);
 
     }
     return;
   }
 
   void sum(Computables comp, cudaStream_t st) override {
+    // std::cout << "=========" << " CustomContactInteractor at time " << time << " " <<"=========" << std::endl;
     Box box(boxSize);
     nl->update(box, rcut, st);
     comp.torque = false; // Ensure torque is computed
-    comp.stress = false; // Ensure stress is computed
+    comp.stress = true; // Ensure stress is computed
 
     // DON'T mark contacts inactive - we want to preserve history!
     // Instead, the kernel will mark contacts as active when found
@@ -1664,14 +1780,8 @@ int main(int argc, char *argv[]) {
   //   nd->addInteractor(torque_ext);
   // }
 
-  // int Nsteps = 312500;
-  // int Nsteps = 395978;
-  // int Nsteps = 100000;
-  // int Nsteps = 2;
-  // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
-  // int Nwrite = 1584; // Steps required for plate particle to travel its size 
-  // exit(0);
   for( int step = 0; step < sim.par.Nsteps; step++){
+  // for( int step = 0; step < 100; step++){
       nd->forwardTime();
       // std::cout << "Step " << step << " done." << std::endl;
       if ((step+1) % sim.par.Nwrite == 0 || step == 0){ // Write every Nwrite steps
