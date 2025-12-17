@@ -51,11 +51,11 @@ using namespace uammd;
 // time being, lets simply hardcode some values
 // Later, we will see how to read these parameters from a file.
 struct Parameters {
-  int numberParticles = 100704;
-  int movingParticles = 352; 
-  int stationaryParticles = 352; 
+  int numberParticles = 180950;
+  int movingParticles = 475; 
+  int stationaryParticles = 475; 
   int interiorParticles = numberParticles - movingParticles - stationaryParticles;
-  real3 boxSize = make_real3(704.7076416015625, 708.4117, 1.0); // Size of the box in each direction
+  real3 boxSize = make_real3(951.560791015625, 955.2674, 1.0); // Size of the box in each direction
 
   real mass = 0.001; // Mass of the particles (Stokes number is small ~ O(10^-2))
   real viscosity = 1.0 / (6 * M_PI);
@@ -592,7 +592,7 @@ struct ContactManager {
   // Hash table for O(1) lookup
   static constexpr uint32_t EMPTY_KEY = 0xFFFFFFFF;
   static constexpr unsigned long long EMPTY_PACKED = 0xFFFFFFFFFFFFFFFFull;
-  static constexpr int MAX_PROBES = 512; 
+  static constexpr int MAX_PROBES = 1024; 
   using u64 = unsigned long long;
   struct HashEntry {
   // Upper 32 bits: key (packed (i,j))

@@ -107,9 +107,9 @@ def write_gsd(filename, radii_file, Nparticles, box, dt, Nsteps, particle_groups
 if __name__ == "__main__":
     dat_file ="particles3.dat"; "particles2.dat"; "particles.dat"
     radii_file = "input/radii.dat"
-    box = [704.7076416015625, 708.4117, 0.0]
-    Nparticles = 100704
-    platePaticles = 352
+    box = [951.560791015625, 955.2674, 0.0]
+    Nparticles = 180950
+    platePaticles = 475
     dt = 0.0008; 0.001
     Nwrite = 1250; 1584
     Nsteps = int(500*Nwrite/Nwrite)
