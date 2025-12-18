@@ -38,7 +38,7 @@ def read_dat_file(filename):
     print(data[-10:])
     return np.asarray(data, dtype=np.float32)
 
-def read_dat_file_simple(filename, usecols=(0,1,2,-3, -2, -1)):
+def read_dat_file_simple(filename, usecols=(0,1,2,4,5,6,-3, -2, -1)):
     """Loads the first 3 columns of a .dat file into a numpy array using numpy.loadtxt."""
     print(f"Reading data from {filename} (simple method)")
     data = np.loadtxt(filename, comments='#', usecols=usecols)
