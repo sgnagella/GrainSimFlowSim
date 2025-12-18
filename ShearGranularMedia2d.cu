@@ -96,7 +96,7 @@ struct Parameters {
   // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
   int Nwrite = 1250; // Steps required for plate particle to travel its size 
   // int Nwrite = 1;
-  int Nsteps = 250 * Nwrite;
+  int Nsteps = 500 * Nwrite;
   // int Nsteps = 1 * Nwrite;
 
 };
@@ -592,7 +592,7 @@ struct ContactManager {
   // Hash table for O(1) lookup
   static constexpr uint32_t EMPTY_KEY = 0xFFFFFFFF;
   static constexpr unsigned long long EMPTY_PACKED = 0xFFFFFFFFFFFFFFFFull;
-  static constexpr int MAX_PROBES = 512; 
+  static constexpr int MAX_PROBES = 1024; 
   using u64 = unsigned long long;
   struct HashEntry {
   // Upper 32 bits: key (packed (i,j))
