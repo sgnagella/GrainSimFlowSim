@@ -38,7 +38,7 @@ def read_dat_file(filename):
     print(data[-10:])
     return np.asarray(data, dtype=np.float32)
 
-def read_dat_file_simple(filename, usecols=(0,1,2,-3, -2, -1)):
+def read_dat_file_simple(filename, usecols=(0,1,2,4,5,6,-3, -2, -1)):
     """Loads the first 3 columns of a .dat file into a numpy array using numpy.loadtxt."""
     print(f"Reading data from {filename} (simple method)")
     data = np.loadtxt(filename, comments='#', usecols=usecols)
@@ -112,7 +112,7 @@ if __name__ == "__main__":
     platePaticles = 31
     dt = 0.0008; 0.001
     Nwrite = 1250; 1584
-    Nsteps = int(500*Nwrite/Nwrite)
+    Nsteps = int(700*Nwrite/Nwrite)
     # Nsteps = int(312500/1250)
     # Nsteps = int(100000/1250)
     particle_groups = {"A": [0]*(platePaticles), "B": [1]*(platePaticles), "C": [2]*(Nparticles - 2*platePaticles)} ;  {"A": [0]*(Nparticles//2), "B": [1]*(Nparticles//2)}; {"A":[0]*Nparticles}; 
