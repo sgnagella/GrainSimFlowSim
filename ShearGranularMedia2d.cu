@@ -61,7 +61,7 @@ struct Parameters {
   real viscosity = 1.0 / (6 * M_PI);
   real hydrodynamicRadius = 1.0;
   real temperature = 0.0;
-  real dt = 0.0008; // Time integration step
+  real dt = 0.0005 // Time integration step
   // real k = 5.0; // Spring constant for the harmonic well
   // real k = 10.0;
   real3 center = {0, 0, 0}; // Center of the harmonic well
@@ -81,11 +81,12 @@ struct Parameters {
   // real kn = 3.5 * kt;
   // real k = 3.5 * kt;
   real mu = 0.33; // Coefficient of friction
-  real gamma_n = 0.25; // Damping coefficient for normal direction
+  // real gamma_n = 0.25; // Damping coefficient for normal direction
+  real gamma_n = 0.05;
   // real gamma_n = 0.0;
   real gamma_t = 0.25; // Deamping coefficient for tangential direction
   // real gamma_t = 0.0;
-  real3 fext = make_real3(0.01, 0.0, 0.0); // External force on interior particles
+  real3 fext = make_real3(0.001, 0.0, 0.0); // External force on interior particles
   // real gamma_n = 0.005;
   bool is2D = true;
   // real3 Kx = make_real3(0.0, 0.0, 0.0); // shear flow in x-direction whose gradient lies along y
@@ -94,9 +95,9 @@ struct Parameters {
 
   // int Nsteps = 395978;
   // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
-  int Nwrite = 1250; // Steps required for plate particle to travel its size 
+  int Nwrite = 2000; // Steps required for plate particle to travel its size 
   // int Nwrite = 1;
-  int Nsteps = 250 * Nwrite;
+  int Nsteps = 500 * Nwrite;
   // int Nsteps = 1 * Nwrite;
 
 };
@@ -592,7 +593,7 @@ struct ContactManager {
   // Hash table for O(1) lookup
   static constexpr uint32_t EMPTY_KEY = 0xFFFFFFFF;
   static constexpr unsigned long long EMPTY_PACKED = 0xFFFFFFFFFFFFFFFFull;
-  static constexpr int MAX_PROBES = 256; 
+  static constexpr int MAX_PROBES = 8192; 
   using u64 = unsigned long long;
   struct HashEntry {
   // Upper 32 bits: key (packed (i,j))
@@ -607,7 +608,7 @@ struct ContactManager {
   ContactManager(int num_particles) : cutoff_age(25.0) {
     // Estimate the max size of the hash table as ~6x number of particles
     // int expected_contacts = 6 * num_particles;
-    max_contacts =  50 * num_particles; // Allow some extra space
+    max_contacts =  100 * num_particles; // Allow some extra space
 
     cudaMalloc(&contacts, max_contacts * sizeof(ContactHistory));
     cudaMalloc(&contact_count, sizeof(int));
@@ -615,9 +616,9 @@ struct ContactManager {
     cudaMalloc(&cleanup_count, sizeof(int));
     cudaMemset(cleanup_count, 0, sizeof(int));
 
-    // Initialize hash table (2x number of contacts for 50% load factor)
+    // Initialize hash table (8x number of contacts for 12.5% load factor)
     hash_size = 1;
-    while(hash_size < max_contacts * 2){
+    while(hash_size < max_contacts * 8){
       hash_size *= 2;
     }
 
@@ -643,8 +644,19 @@ struct ContactManager {
   }
 
   void resetHashTable(){
-    cudaMemset(hash_table, 0xFF, hash_size * sizeof(HashEntry));
-  }
+    // Make sure this is actually clearing the table
+    printf("Resetting hash table (size=%d)...\n", hash_size);
+    
+    // This should set all entries to EMPTY_PACKED
+    size_t bytes = hash_size * sizeof(HashEntry);
+    cudaMemset(hash_table, 0xFF, bytes);  // Sets all bits to 1 (EMPTY_PACKED)
+    
+    // Verify it worked
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("Failed to reset hash table: %s\n", cudaGetErrorString(err));
+    }
+}
 
   __device__ __forceinline__ u64 pack_entry(uint32_t key, int index) {
     // high 32 bits = key
@@ -1310,9 +1322,9 @@ __global__ void gpu_cleanupContacts(
     // printf("Checking contact between %d and %d at index %d (last active at time %f, current time %f)\n", i, j, idx, contact->contact_age, time);
     if (contact->contact_age < time){
       // printf("Found inactive contact between %d and %d at index %d (last active at time %f, current time %f)\n", i, j, idx, contact->contact_age, time);
-      contact->is_active = false;
       uint32_t key = contact_mgr->pack_key(i, j);
       uint32_t slot = contact_mgr->hash(key);
+      unsigned long long desired = contact_mgr->pack_entry(key, idx);
 
       // Find the hash entry using linear probing
       for (int probe = 0; probe < MAX_PROBES; ++probe){
@@ -1322,13 +1334,27 @@ __global__ void gpu_cleanupContacts(
         unsigned long long cur = entry->packed;
         uint32_t cur_key = contact_mgr->unpack_key(cur);
         // Found existing contact with this key
-        // Avoid race condition by checking whether the entry is already empty
-        if (cur_key == key and entry->packed != ContactManager::EMPTY_PACKED){
-          entry->packed = ContactManager::EMPTY_PACKED;
+        // if (cur_key == key and old != ContactManager::EMPTY_PACKED){
+        if(cur_key == key){
+          unsigned long long old = atomicCAS(&entry->packed, desired, ContactManager::EMPTY_PACKED);
+          // bool is_active = atomicCAS(&contact->is_active, true, false);
+          // entry->packed = ContactManager::EMPTY_PACKED;
           // A new active contact will occupy this empty slot
           // printf("Cleaning up contact between %d and %d at index %d\n", i, j, idx); 
           // atomicSub(contact_mgr->contact_count, 1);
-          atomicAdd(contact_mgr->cleanup_count, 1);
+          if (old == desired){
+            // Successfully removed
+            // printf("Cleaned up contact between %d and %d at index %d\n", i, j, idx);
+            contact->xi = make_real3(0,0,0);
+            contact->contact_time = real(0.0);
+            contact->contact_age = real(0.0);
+            contact->is_active = false; // Mark as inactive
+            atomicAdd(contact_mgr->cleanup_count, 1);
+          }
+          // else{
+          //   // Failed to remove - another thread modified it
+          //   continue;
+          // }
         }
       }
     }
@@ -1341,7 +1367,16 @@ __global__ void gpu_rebuildHashTable(
   ContactManager::HashEntry *hash_table // Hash table to rebuild
   ){
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= contact_mgr->max_contacts) return;
+  const int count = *(contact_mgr->contact_count);
+  // if (idx >= contact_mgr->max_contacts) return;
+  // Process 
+  if (idx == 0) {
+    printf("Rebuilding: contacts=%d, hash_size=%d, load=%.2f%%\n",
+           count, contact_mgr->hash_size,
+           (100.0f * count) / contact_mgr->hash_size);
+  }
+
+  if (idx >= count) return; 
 
   // using HashEntry = ContactManager::HashEntry;
   // HashEntry *hash_table = contact_mgr->hash_table;
@@ -1411,7 +1446,7 @@ class CustomContactInteractor : public ParameterUpdatable, public Interactor {
   real mu; // Coefficient of friction
   real gamma_n; // Damping coefficient for normal direction
   real gamma_t; // Damping coefficient for tangential direction
-  int cleanup_interval = 5000; // Interval for cleaning inactive contacts
+  int cleanup_interval = 2000; // Interval for cleaning inactive contacts
 
 public: 
   CustomContactInteractor( UAMMD sim ) : 
@@ -1468,8 +1503,8 @@ public:
     // }
 
     gpu_rebuildHashTable<<<contact_mgr->max_contacts / 128 + 1, 128, 0, st>>>(
-        d_contact_mgr,
-        contact_mgr->hash_table
+      d_contact_mgr,
+      contact_mgr->hash_table
     );
     err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -1488,11 +1523,20 @@ public:
     // Periodically clean up inactive contacts 
     steps = (time/dt)+1;
     if ( (steps % cleanup_interval) == 0){
-      int h_count = 0; 
-      cudaMemcpy(&h_count, contact_mgr->contact_count, sizeof(int), cudaMemcpyDeviceToHost);
-      std::cout << "Starting contact cleanup at time " << time << " with " << h_count << " contacts." << std::endl;
+      cudaStreamSynchronize(st);
+      thrust::device_ptr<ContactHistory> d_begin(contact_mgr->contacts);
+      thrust::device_ptr<ContactHistory> d_end = d_begin + contact_mgr->max_contacts; 
+      int h_count = thrust::count_if(
+        d_begin,
+        d_end, 
+        [] __device__ (const ContactHistory& contact) { return contact.is_active; }
+      );
+
+      // int h_count = 0; 
+      // cudaMemcpy(&h_count, contact_mgr->contact_count, sizeof(int), cudaMemcpyDeviceToHost);
+      std::cout << "Starting contact cleanup at time " << time << " with " << h_count << " active contacts." << std::endl;
       // fprintf(stdout, "Cleaning up inactive contacts at time %f (step %d)\n", time, steps);
-      gpu_cleanupContacts<<<contact_mgr->max_contacts / 128 + 1, 128, 0, st>>>(d_contact_mgr, contact_mgr->hash_table, time-dt);
+      gpu_cleanupContacts<<<contact_mgr->max_contacts / 128 + 1, 128, 0, st>>>(d_contact_mgr, contact_mgr->hash_table, time-2*dt);
       cudaError_t err = cudaGetLastError();
       if (err != cudaSuccess) {
           fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(err));
@@ -1503,7 +1547,6 @@ public:
           // Optional: exit or raise error so program stops near the failing kernel
           exit(1);
       }
-
       // Print number of cleaned contacts
       // cudaMemcpy(&h_count, contact_mgr->cleanup_count, sizeof(int), cudaMemcpyDeviceToHost);
       // std::cout << "Cleaned up " << h_count << " inactive contacts at time " << time << std::endl;
@@ -1511,6 +1554,14 @@ public:
       int cleaned;
       cudaMemcpy(&cleaned, contact_mgr->cleanup_count, sizeof(int), cudaMemcpyDeviceToHost);
       std::cout << "Marked " << cleaned << " contacts as inactive" << std::endl;
+
+      int total_active = count_if(
+        thrust::device,
+        d_begin,
+        d_end, 
+        [] __device__ (const ContactHistory& contact) { return contact.is_active; }
+      );
+      std::cout << "Total active contacts before compaction: " << total_active << std::endl;
 
       // Reset cleanup count
       // int zero = 0;
@@ -1525,8 +1576,8 @@ public:
       //            cudaMemcpyDeviceToHost);
 
       std::cout << "Compacting contacts array after cleanup..." << std::endl;
-      thrust::device_ptr<ContactHistory> d_begin(contact_mgr->contacts);
-      thrust::device_ptr<ContactHistory> d_end = d_begin + contact_mgr->max_contacts;  
+      // thrust::device_ptr<ContactHistory> d_begin(contact_mgr->contacts);
+      // thrust::device_ptr<ContactHistory> d_end = d_begin + contact_mgr->max_contacts;  
       // Compact the contacts array to remove inactive contacts
       // auto new_end = thrust::remove_if(
       //   thrust::device,
@@ -1544,6 +1595,11 @@ public:
       std::cout << "Compaction complete." << std::endl;
       // Obtain new contact count by summing over active contacts
       int new_count = thrust::distance(d_begin, new_end);
+      // int new_count = thrust::count_if(
+      //   d_begin,
+      //   new_end, 
+      //   [] __device__ (const ContactHistory& contact) { return contact.is_active; }
+      // );
       std::cout << "After compaction: " << new_count << " active contacts (removed " 
                 << (h_count - new_count) << ")" << std::endl;
 
@@ -1556,7 +1612,8 @@ public:
       // cudaMemcpy(contact_mgr->contact_count, &new_count, sizeof(int), cudaMemcpyHostToDevice);
       // std::cout << "Updated contact count after compaction: " << new_count << std::endl;
 
-      // Step 4: Update contact count
+      // Step 4: Update contact counts
+      cudaMemset(contact_mgr->contact_count, 0, sizeof(int));
       cudaMemcpy(contact_mgr->contact_count, &new_count, sizeof(int), 
       cudaMemcpyHostToDevice);
 
@@ -1569,17 +1626,25 @@ public:
       //            cudaMemcpyHostToDevice);
       // cudaMemcpy(contact_mgr->contact_count, &new_count, sizeof(int), cudaMemcpyHostToDevice);
       
-      int blocks = (contact_mgr->max_contacts + 127) / 128;  // Only process active contacts
+      // int blocks = (contact_mgr->max_contacts / 128 + 1);  // Only process active contacts
+      int blocks = (new_count / 128 + 1);  // Only process active contacts
       std::cout << "Rebuilding hash table for " << new_count << " contacts..." << std::endl;
       
       gpu_rebuildHashTable<<<blocks, 128, 0, st>>>(d_contact_mgr, contact_mgr->hash_table);
       
+      err = cudaDeviceSynchronize();
+      if (err != cudaSuccess) {
+          fprintf(stderr, "Device sync failed after kernel: %s\n", cudaGetErrorString(err));
+          // Optional: exit or raise error so program stops near the failing kernel
+          exit(1);
+      }
+
       err = cudaGetLastError();
       if (err != cudaSuccess) {
           fprintf(stderr, "Rebuild kernel failed: %s\n", cudaGetErrorString(err));
           exit(1);
       }
-      cudaStreamSynchronize(st);
+      // cudaStreamSynchronize(st);
     
       std::cout << "Cleanup complete.\n" << std::endl;
       // std::cout << "Rebuilding hash table after cleanup..." << std::endl;
@@ -1644,6 +1709,25 @@ public:
     processNeighboursContacts<decltype(ni)><<<numberParticles / 128 + 1, 128, 0, st>>>(
         ni, time, Nwrite, numberParticles, box, radius, vel, ang_vel, force, torque, energy, virial, stress_x, stress_y, stress_z,
         dt, kn, kt, mu, gamma_n, gamma_t, d_contact_mgr);
+    
+    // int steps = (time/dt)+1;
+    // if (steps % 100 == 0) {
+    //   printf("Forcing sync at step %lld...\n", steps);
+    //   fflush(stdout);
+      
+    //   auto start = std::chrono::high_resolution_clock::now();
+    //   cudaStreamSynchronize(st);
+    //   auto end = std::chrono::high_resolution_clock::now();
+      
+    //   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    //   if (duration.count() > 1000) {
+    //     printf("WARNING: Sync took %lld ms - kernel is too slow!\n", duration.count());
+        
+    //     // Force cleanup even if not scheduled
+    //     printf("Forcing emergency cleanup due to slow kernel\n");
+    //     h_cleanupContacts(st);
+    //   }
+    // }
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(err));
