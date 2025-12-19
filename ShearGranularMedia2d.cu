@@ -677,24 +677,42 @@ struct ContactManager {
   }
 
   // Pack two particle IDs into one key
-  __device__ uint32_t pack_key(int i, int j) {
-    // Ensure consistent ordering
-    uint16_t min_id = min(i, j);
-    uint16_t max_id = max(i, j);
-    // Assumes particle IDs < 65536 (16 bits each)
-    return (uint32_t(min_id) << 16) | max_id;
+  // __device__ uint32_t pack_key(int i, int j) {
+  //   // Ensure consistent ordering
+  //   uint16_t min_id = min(i, j);
+  //   uint16_t max_id = max(i, j);
+  //   // Assumes particle IDs < 65536 (16 bits each)
+  //   return (uint32_t(min_id) << 16) | max_id;
+  // }
+  __device__ __forceinline__ uint64_t pack_key64(uint32_t i, uint32_t j) {
+    uint32_t lo = min(i, j);
+    uint32_t hi = max(i, j);
+    return (uint64_t(hi) << 32) | uint64_t(lo);
   }
 
   // Hash function
-  __device__ uint32_t hash(uint32_t key){
-    // MurmurHash3 finalizer
-    key ^= key >> 16;
-    key *= 0x85ebca6b;
-    key ^= key >> 13;
-    key *= 0xc2b2ae35;
-    key ^= key >> 16;
-    return key & (hash_size - 1);
+  // __device__ uint32_t hash(uint32_t key){
+  //   // MurmurHash3 finalizer
+  //   key ^= key >> 16;
+  //   key *= 0x85ebca6b;
+  //   key ^= key >> 13;
+  //   key *= 0xc2b2ae35;
+  //   key ^= key >> 16;
+  //   return key & (hash_size - 1);
+  // }
+
+  __device__ __forceinline__ uint64_t hash(uint64_t k) {
+    k ^= k >> 33;
+    k *= 0xff51afd7ed558ccduLL;
+    k ^= k >> 33;
+    k *= 0xc4ceb9fe1a85ec53uLL;
+    k ^= k >> 33;
+    return k;
   }
+
+  __device__ __forceinline__ uint32_t hash64_to_idx(uint64_t k, uint32_t mask) {
+      return (uint32_t)fmix64(k) & mask;   // mask = hash_size - 1
+  } 
 
   __device__ ContactHistory* returnContact(int index) {
     if (index < 0 || index >= *contact_count) {
@@ -713,8 +731,8 @@ struct ContactManager {
   // Main function: Find existing contact or create a new one
   __device__ ContactHistory* getContact_v1(int i, int j) {
     // printf("getContact_v1 called for (%d, %d)\n", i, j);
-    uint32_t key  = pack_key(i, j);
-    uint32_t slot = hash(key);
+    uint64_t key  = pack_key(i, j);
+    uint64_t slot = hash(key);
 
     // Reserve a contact index up-front
     int my_idx = atomicAdd(contact_count, 1);
