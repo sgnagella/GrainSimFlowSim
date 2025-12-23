@@ -39,6 +39,9 @@
 // #include <thrust/iterator/transform_iterator.h>
 #include <thrust/device_ptr.h>
 #include <thrust/distance.h>
+#include <thrust/partition.h>
+#include <thrust/execution_policy.h>
+#include <thrust/system/cuda/execution_policy.h>
 // #include <thrust/transform_reduce.h>
 #include <utils/vector.cuh>
 #include <utils/InitialConditions.cuh>
@@ -96,7 +99,7 @@ struct Parameters {
   // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
   int Nwrite = 1250; // Steps required for plate particle to travel its size 
   // int Nwrite = 1;
-  int Nsteps = 500 * Nwrite;
+  int Nsteps = 1000 * Nwrite;
   // int Nsteps = 1 * Nwrite;
 
 };
@@ -587,12 +590,11 @@ struct ContactManager {
   int max_contacts;                 // Maximum contacts we can store
   int* cleanup_count;               // Statistics for cleanup
   float cutoff_age;                   // Age after which contact is removed
-  int* avail_indices;                // Indices of available contact slots
 
   // Hash table for O(1) lookup
   static constexpr uint32_t EMPTY_KEY = 0xFFFFFFFF;
   static constexpr unsigned long long EMPTY_PACKED = 0xFFFFFFFFFFFFFFFFull;
-  static constexpr int MAX_PROBES = 4096; 
+  static constexpr int MAX_PROBES = 128; 
   using u64 = unsigned long long;
   struct HashEntry {
   // Upper 32 bits: key (packed (i,j))
@@ -607,7 +609,7 @@ struct ContactManager {
   ContactManager(int num_particles) : cutoff_age(25.0) {
     // Estimate the max size of the hash table as ~6x number of particles
     // int expected_contacts = 6 * num_particles;
-    max_contacts =  100 * num_particles; // Allow some extra space
+    max_contacts =  10 * num_particles; // Allow some extra space
 
     cudaMalloc(&contacts, max_contacts * sizeof(ContactHistory));
     cudaMalloc(&contact_count, sizeof(int));
@@ -620,6 +622,7 @@ struct ContactManager {
     while(hash_size < max_contacts * 2){
       hash_size *= 2;
     }
+    assert((hash_size & (hash_size - 1)) == 0 && "hash_size must be power of two");
 
     cudaMalloc(&hash_table, hash_size * sizeof(HashEntry));
     // HashEntry empty_entry = {EMPTY_KEY, -1};
@@ -665,16 +668,16 @@ struct ContactManager {
   }
 
   // Pack two particle IDs into one key
-  __device__ uint32_t pack_key(int i, int j) {
+  __device__ uint64_t pack_key(int i, int j) {
     // Ensure consistent ordering
-    uint16_t min_id = min(i, j);
-    uint16_t max_id = max(i, j);
+    uint32_t min_id = min(i, j);
+    uint32_t max_id = max(i, j);
     // Assumes particle IDs < 65536 (16 bits each)
     return (uint32_t(min_id) << 16) | max_id;
   }
 
   // Hash function
-  __device__ uint32_t hash(uint32_t key){
+  __device__ uint64_t hash1(uint64_t key){
     // MurmurHash3 finalizer
     key ^= key >> 16;
     key *= 0x85ebca6b;
@@ -682,6 +685,19 @@ struct ContactManager {
     key *= 0xc2b2ae35;
     key ^= key >> 16;
     return key & (hash_size - 1);
+  }
+
+  // Secondary hash for stride
+  __device__ uint64_t hash2(uint64_t key){
+    // Different hash function to avoid correlation
+    key = ((key >> 16) ^ key) * 0x45d9f3b;
+    key = ((key >> 16) ^ key) * 0x45d9f3b;
+    key = (key >> 16) ^ key;
+    
+    // CRITICAL: Must return odd number for power-of-2 table sizes
+    // This ensures we can probe all slots
+    uint64_t stride = key & (hash_size - 1);
+    return stride | 1;  // Set lowest bit to ensure odd
   }
 
   __device__ ContactHistory* returnContact(int index) {
@@ -701,8 +717,9 @@ struct ContactManager {
   // Main function: Find existing contact or create a new one
   __device__ ContactHistory* getContact_v1(int i, int j) {
     // printf("getContact_v1 called for (%d, %d)\n", i, j);
-    uint32_t key  = pack_key(i, j);
-    uint32_t slot = hash(key);
+    uint64_t key  = pack_key(i, j);
+    uint64_t slot = hash1(key);
+    uint64_t stride = hash2(key);
 
     // Reserve a contact index up-front
     int my_idx = atomicAdd(contact_count, 1);
@@ -719,18 +736,18 @@ struct ContactManager {
     // printf("Current contact count: %d\n", *contact_count);
     // Linear probe to find or insert
     for (int probe = 0; probe < MAX_PROBES; ++probe) {
-      uint32_t current_slot = (slot + probe) & (hash_size - 1);
+      uint64_t slot_calc = slot + uint64_t(probe) * stride;
+      uint64_t current_slot = slot_calc & (hash_size - 1);
       HashEntry* entry = &hash_table[current_slot];
 
       // Snapshot current packed value
       unsigned long long cur = entry->packed;
-      uint32_t cur_key = unpack_key(cur);
+      uint64_t cur_key = unpack_key(cur);
 
       // Case 1: found existing contact with this key
       if (cur_key == key) {
         // We don't need the new index we reserved
         atomicSub(contact_count, 1);
-
         int idx = unpack_index(cur);
         contacts[idx].is_active = true;
         // printf("Retrieved contact for (%d, %d): idx=%d, age=%f\n", contacts[idx].particle_i, contacts[idx].particle_j, idx, contacts[idx].contact_age);
@@ -767,7 +784,7 @@ struct ContactManager {
         // }
 
         // Another thread beat us to this slot
-        uint32_t old_key = unpack_key(old);
+        uint64_t old_key = unpack_key(old);
         if (old_key == key) {
           // Another thread inserted the same contact
           atomicSub(contact_count, 1);  // give back our unused index
@@ -1310,21 +1327,25 @@ __global__ void gpu_cleanupContacts(
     // printf("Checking contact between %d and %d at index %d (last active at time %f, current time %f)\n", i, j, idx, contact->contact_age, time);
     if (contact->contact_age < time){
       // printf("Found inactive contact between %d and %d at index %d (last active at time %f, current time %f)\n", i, j, idx, contact->contact_age, time);
-      uint32_t key = contact_mgr->pack_key(i, j);
-      uint32_t slot = contact_mgr->hash(key);
+      uint64_t key = contact_mgr->pack_key(i, j);
+      uint64_t slot = contact_mgr->hash1(key);
+      uint64_t stride = contact_mgr->hash2(key);
       unsigned long long desired = contact_mgr->pack_entry(key, idx);
 
       // Find the hash entry using linear probing
       for (int probe = 0; probe < MAX_PROBES; ++probe){
-        uint32_t current_slot = (slot + probe) & (hash_size - 1);
+        uint64_t slot_calc = slot + uint64_t(probe) * stride;
+        uint64_t current_slot = slot_calc & (hash_size - 1);
         // Snapshot current packed value
         ContactManager::HashEntry *entry = &hash_table[current_slot];
         unsigned long long cur = entry->packed;
-        uint32_t cur_key = contact_mgr->unpack_key(cur);
+        uint64_t cur_key = contact_mgr->unpack_key(cur);
         // Found existing contact with this key
         // if (cur_key == key and old != ContactManager::EMPTY_PACKED){
         if(cur_key == key){
-          unsigned long long old = atomicCAS(&entry->packed, desired, ContactManager::EMPTY_PACKED);
+          unsigned long long old = atomicCAS(&entry->packed, 
+                                             desired, 
+                                             ContactManager::EMPTY_PACKED);
           // bool is_active = atomicCAS(&contact->is_active, true, false);
           // entry->packed = ContactManager::EMPTY_PACKED;
           // A new active contact will occupy this empty slot
@@ -1335,7 +1356,15 @@ __global__ void gpu_cleanupContacts(
             // printf("Cleaned up contact between %d and %d at index %d\n", i, j, idx);
             contact->is_active = false;
             atomicAdd(contact_mgr->cleanup_count, 1);
+            return;
           }
+          // If we hit an empty slot, contact isn't in hash table
+          // if (cur == ContactManager::EMPTY_PACKED) {
+          //   // Contact not found in hash - still mark inactive
+          //   contact->is_active = false;
+          //   atomicAdd(contact_mgr->cleanup_count, 1);
+          //   return;
+          // }
           // else{
           //   // Failed to remove - another thread modified it
           //   continue;
@@ -1365,12 +1394,14 @@ __global__ void gpu_rebuildHashTable(
   if( i<0 || j<0 ) return; // Invalid contact
   else if( !contact->is_active ) return; // Never activated contact
 
-  uint32_t key = contact_mgr->pack_key(i, j); 
-  uint32_t slot = contact_mgr->hash(key); 
+  uint64_t key = contact_mgr->pack_key(i, j); 
+  uint64_t slot = contact_mgr->hash1(key); 
+  uint64_t stride = contact_mgr->hash2(key);
 
   // Linear probe to find or insert 
   for(int probe = 0; probe < MAX_PROBES; probe++){
-    uint32_t current_slot = (slot + probe) & (hash_size -1);
+    uint64_t slot_calc = slot + uint64_t(probe) * stride;
+    uint64_t current_slot = slot_calc & (hash_size -1);
     ContactManager::HashEntry* entry = &hash_table[current_slot];
     unsigned long long cur = entry->packed;
 
@@ -1388,7 +1419,7 @@ __global__ void gpu_rebuildHashTable(
         return;
       } else {
         // Failed - check if it's our key
-        uint32_t old_key = contact_mgr->unpack_key(old);
+        uint64_t old_key = contact_mgr->unpack_key(old);
         if (old_key == key) {
           // Another thread inserted the same contact
           return;
@@ -1413,7 +1444,7 @@ class CustomContactInteractor : public ParameterUpdatable, public Interactor {
   ContactManager *d_contact_mgr = nullptr; // Device pointer to contact manager
   real dt;
   real time = 0;
-  long long steps;
+  uint64_t steps = 0;
   int Nwrite;
   real rcut; 
   real3 boxSize;
@@ -1423,7 +1454,7 @@ class CustomContactInteractor : public ParameterUpdatable, public Interactor {
   real mu; // Coefficient of friction
   real gamma_n; // Damping coefficient for normal direction
   real gamma_t; // Damping coefficient for tangential direction
-  int cleanup_interval = 3500; // Interval for cleaning inactive contacts
+  uint64_t cleanup_interval = 1250; // Interval for cleaning inactive contacts
 
 public: 
   CustomContactInteractor( UAMMD sim ) : 
@@ -1498,12 +1529,20 @@ public:
   void h_cleanupContacts(cudaStream_t st) {
     // std::cout << "Contact cleanup check at time " << time << std::endl;
     // Periodically clean up inactive contacts 
-    steps = (time/dt)+1;
+    ++steps; 
+    if ((steps % 10000) == 0) {
+      std::cout << "DEBUG step=" << steps
+                << " time/dt=" << (time/dt)
+                << " time=" << time << "\n";
+    }
     if ( (steps % cleanup_interval) == 0){
       cudaStreamSynchronize(st);
+      auto policy = thrust::cuda::par.on(st);
+
       thrust::device_ptr<ContactHistory> d_begin(contact_mgr->contacts);
       thrust::device_ptr<ContactHistory> d_end = d_begin + contact_mgr->max_contacts; 
       int h_count = thrust::count_if(
+        policy,
         d_begin,
         d_end, 
         [] __device__ (const ContactHistory& contact) { return contact.is_active; }
@@ -1513,7 +1552,9 @@ public:
       // cudaMemcpy(&h_count, contact_mgr->contact_count, sizeof(int), cudaMemcpyDeviceToHost);
       std::cout << "Starting contact cleanup at time " << time << " with " << h_count << " active contacts." << std::endl;
       // fprintf(stdout, "Cleaning up inactive contacts at time %f (step %d)\n", time, steps);
-      gpu_cleanupContacts<<<contact_mgr->max_contacts / 128 + 1, 128, 0, st>>>(d_contact_mgr, contact_mgr->hash_table, time-2*dt);
+      int threads = 128;
+      int blocks = (contact_mgr->max_contacts + threads - 1) / threads;
+      gpu_cleanupContacts<<<blocks, threads, 0, st>>>(d_contact_mgr, contact_mgr->hash_table, time-2*dt);
       cudaError_t err = cudaGetLastError();
       if (err != cudaSuccess) {
           fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(err));
@@ -1533,7 +1574,7 @@ public:
       std::cout << "Marked " << cleaned << " contacts as inactive" << std::endl;
 
       int total_active = count_if(
-        thrust::device,
+        policy,
         d_begin,
         d_end, 
         [] __device__ (const ContactHistory& contact) { return contact.is_active; }
@@ -1565,6 +1606,7 @@ public:
 
       auto new_end = thrust::partition(
         // thrust::device,
+        policy,
         d_begin,
         d_end,
         [] __device__ (const ContactHistory& contact) { return contact.is_active; }
@@ -1603,10 +1645,12 @@ public:
       //            cudaMemcpyHostToDevice);
       // cudaMemcpy(contact_mgr->contact_count, &new_count, sizeof(int), cudaMemcpyHostToDevice);
       
-      int blocks = (contact_mgr->max_contacts / 128 +1);  // Only process active contacts
+      // Reset the hash table 
+      contact_mgr->resetHashTable();
+      blocks = (new_count + threads - 1) / threads;
       std::cout << "Rebuilding hash table for " << new_count << " contacts..." << std::endl;
       
-      gpu_rebuildHashTable<<<blocks, 128, 0, st>>>(d_contact_mgr, contact_mgr->hash_table);
+      gpu_rebuildHashTable<<<blocks, threads, 0, st>>>(d_contact_mgr, contact_mgr->hash_table);
       
       err = cudaDeviceSynchronize();
       if (err != cudaSuccess) {
