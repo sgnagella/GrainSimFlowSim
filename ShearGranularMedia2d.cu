@@ -54,11 +54,11 @@ using namespace uammd;
 // time being, lets simply hardcode some values
 // Later, we will see how to read these parameters from a file.
 struct Parameters {
-  int numberParticles = 286;
-  int movingParticles = 15; 
-  int stationaryParticles = 15; 
+  int numberParticles = 50498;
+  int movingParticles = 249; 
+  int stationaryParticles = 249; 
   int interiorParticles = numberParticles - movingParticles - stationaryParticles;
-  real3 boxSize = make_real3(38.01401138305664, 42.782547, 1.0); // Size of the box in each direction
+  real3 boxSize = make_real3(498.43841552734375, 502.14197, 1.0); // Size of the box in each direction
 
   real mass = 0.001; // Mass of the particles (Stokes number is small ~ O(10^-2))
   real viscosity = 1.0 / (6 * M_PI);
@@ -84,11 +84,11 @@ struct Parameters {
   // real kn = 3.5 * kt;
   // real k = 3.5 * kt;
   real mu = 0.33; // Coefficient of friction
-  real gamma_n = 0.25; // Damping coefficient for normal direction
+  real gamma_n = 0.05; // Damping coefficient for normal direction
   // real gamma_n = 0.0;
   real gamma_t = 0.25; // Deamping coefficient for tangential direction
   // real gamma_t = 0.0;
-  real3 fext = make_real3(0.01, 0.0, 0.0); // External force on interior particles
+  real3 fext = make_real3(0.0001, 0.0, 0.0); // External force on interior particles
   // real gamma_n = 0.005;
   bool is2D = true;
   // real3 Kx = make_real3(0.0, 0.0, 0.0); // shear flow in x-direction whose gradient lies along y
@@ -99,7 +99,7 @@ struct Parameters {
   // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
   int Nwrite = 1250; // Steps required for plate particle to travel its size 
   // int Nwrite = 1;
-  int Nsteps = 1000 * Nwrite;
+  int Nsteps = 2500 * Nwrite;
   // int Nsteps = 1 * Nwrite;
 
 };
@@ -594,7 +594,7 @@ struct ContactManager {
   // Hash table for O(1) lookup
   static constexpr uint32_t EMPTY_KEY = 0xFFFFFFFF;
   static constexpr unsigned long long EMPTY_PACKED = 0xFFFFFFFFFFFFFFFFull;
-  static constexpr int MAX_PROBES = 128; 
+  static constexpr int MAX_PROBES = 512; 
   using u64 = unsigned long long;
   struct HashEntry {
   // Upper 32 bits: key (packed (i,j))
