@@ -54,17 +54,15 @@ using namespace uammd;
 // time being, lets simply hardcode some values
 // Later, we will see how to read these parameters from a file.
 struct Parameters {
-  int numberParticles = 50498;
-  int movingParticles = 249; 
-  int stationaryParticles = 249; 
+  int numberParticles = 286;
+  int movingParticles = 15; 
+  int stationaryParticles = 15; 
   int interiorParticles = numberParticles - movingParticles - stationaryParticles;
   real3 boxSize = make_real3(498.43841552734375, 502.14197, 1.0); // Size of the box in each direction
 
-  real mass = 0.001; // Mass of the particles (Stokes number is small ~ O(10^-2))
   real viscosity = 1.0 / (6 * M_PI);
   real hydrodynamicRadius = 1.0;
   real temperature = 0.0;
-  real dt = 0.0008; // Time integration step
   // real k = 5.0; // Spring constant for the harmonic well
   // real k = 10.0;
   real3 center = {0, 0, 0}; // Center of the harmonic well
@@ -83,10 +81,12 @@ struct Parameters {
   real k = 100.0; // Spring constant for the harmonic well
   // real kn = 3.5 * kt;
   // real k = 3.5 * kt;
-  real mu = 0.33; // Coefficient of friction
-  real gamma_n = 0.05; // Damping coefficient for normal direction
+  real mu = 0.50; // Coefficient of friction
+  real gamma_n = 0.1; // Damping coefficient for normal direction
+  real mass = 0.1 * gamma_n * gamma_n; // Mass of the particles (Stokes number is small ~ O(10^-2))
+  real dt = 0.001 * gamma_n; // Time integration step
   // real gamma_n = 0.0;
-  real gamma_t = 0.25; // Deamping coefficient for tangential direction
+  real gamma_t = 0.5 * gamma_n; // Deamping coefficient for tangential direction
   // real gamma_t = 0.0;
   real3 fext = make_real3(0.0001, 0.0, 0.0); // External force on interior particles
   // real gamma_n = 0.005;
@@ -97,9 +97,9 @@ struct Parameters {
 
   // int Nsteps = 395978;
   // int Nwrite = 1250; // Write every (1/dt) steps (1 time unit)
-  int Nwrite = 1250; // Steps required for plate particle to travel its size 
+  int Nwrite = int(1./dt); // Steps required for plate particle to travel its size 
   // int Nwrite = 1;
-  int Nsteps = 2500 * Nwrite;
+  int Nsteps = 500 * Nwrite;
   // int Nsteps = 1 * Nwrite;
 
 };
@@ -1454,7 +1454,7 @@ class CustomContactInteractor : public ParameterUpdatable, public Interactor {
   real mu; // Coefficient of friction
   real gamma_n; // Damping coefficient for normal direction
   real gamma_t; // Damping coefficient for tangential direction
-  uint64_t cleanup_interval = 1250; // Interval for cleaning inactive contacts
+  uint64_t cleanup_interval; // Interval for cleaning inactive contacts
 
 public: 
   CustomContactInteractor( UAMMD sim ) : 
@@ -1472,6 +1472,8 @@ public:
     gamma_n(sim.par.gamma_n),
     gamma_t(sim.par.gamma_t)
      {
+      cleanup_interval = uint64_t(1.0 / dt); // Clean up every 1.0 time units
+      // cleanup_interval = 1250;
       nl = std::make_shared<CellList>(sim.pd);
       // Initialize contact manager with estimated max contacts
       // int max_contacts = numberParticles * 1000;  // Estimate 10 contacts per particle
