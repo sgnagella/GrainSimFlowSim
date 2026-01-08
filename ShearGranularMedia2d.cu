@@ -39,7 +39,7 @@
 #include <utils/vector.cuh>
 #include <utils/InitialConditions.cuh>
 
-#include "ExternalForcesStructs.cuh"
+// #include "ExternalForcesStructs.cuh"
 #include "Contacts.cuh"
 // #include "GPU_contacts.cuh"
 #include "SimUtils.cuh"
@@ -317,22 +317,6 @@ auto createExternalPotentialInteractor(UAMMD sim, std::shared_ptr<ParticleGroup>
   auto well = std::make_shared<MovingHarmonicField>(sim, moving);
   auto ext = std::make_shared<ExternalForces<MovingHarmonicField>>(pg, well);
   return ext;
-}
-
-__device__ void compute_contact_forces(
-    real kn, real kt, 
-    real gamma_n, 
-    real gamma_t,
-    real mu, real3 rij, real3 vij, 
-    ContactHistory* contact, real radius_sum, real3 &fn, real3 &fdiss){
-    // Modifies fn and fdiss by reference
-      if(( contact != nullptr) && ( contact->is_active)){
-        fn = overlap_force_ij(kn, rij, radius_sum);
-        fdiss = -damping_force_ij(gamma_n, vij, rij, true);
-        fdiss += -damping_force_ij(gamma_t, vij, rij, false);
-        fdiss += tangential_frictional_force_ij(kt, contact->xi, mu, fn);
-      }
-      return;
 }
 
 // A new way of using a neighbour list
@@ -1018,7 +1002,6 @@ int main(int argc, char *argv[]) {
   std::cout << "Contacts interactor enabled." << std::endl;
 
   for( int step = 0; step < sim.par.Nsteps; step++){
-  // for( int step = 0; step < 100; step++){
       nd->forwardTime();
       // std::cout << "Step " << step << " done." << std::endl;
       if ((step+1) % sim.par.Nwrite == 0 || step == 0){ // Write every Nwrite steps

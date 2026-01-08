@@ -21,13 +21,13 @@ __inline__ __device__ real3 cross_product_2D(real3 a, real3 b) {
 }
 
 // All functions here assume the overlap state (r < (a + b)) is already checked
-__device__ real3 overlap_force_ij(real kn, real3 rij, real radius_sum){
+__inline__ __device__ real3 overlap_force_ij(real kn, real3 rij, real radius_sum){
     real r = length(rij); 
     real delta = r - radius_sum; // Negative for overlapping particles
     return kn * delta * (rij / r); 
 }
 
-__device__ real3 damping_force_ij(real gamma, real3 vij, real3 rij, bool isNormal){
+__inline__ __device__ real3 damping_force_ij(real gamma, real3 vij, real3 rij, bool isNormal){
     if( gamma == 0.0 ) return make_real3(0.0, 0.0, 0.0);
     if( isNormal ){
         return gamma * normal_component(vij, rij);
@@ -35,24 +35,24 @@ __device__ real3 damping_force_ij(real gamma, real3 vij, real3 rij, bool isNorma
     return gamma * tangential_component(vij, rij);
 }
 
-__device__ real3 normal_frictional_force_ij(real gamma_n, real3 vij, real3 rij){
+__inline__ __device__ real3 normal_frictional_force_ij(real gamma_n, real3 vij, real3 rij){
     if( gamma_n == 0.0 ) return make_real3(0.0, 0.0, 0.0);
     return -gamma_n * normal_component(vij, rij);
 }
 
 // __device__ real3 tangential_frictional_force_ij(real gamma_t, real3 vij)
 
-__device__ real3 static_force_ij(real kt, real3 xi){
+__inline__ __device__ real3 static_force_ij(real kt, real3 xi){
     return -kt * xi; 
 }
 
-__device__ real3 static_torque_ij_2D(real3 fij, real3 rij){
+__inline__ __device__ real3 static_torque_ij_2D(real3 fij, real3 rij){
     // Returns scalar torque in the z direction for 2D case
     real r = length(rij); 
     return make_real3(0.0, 0.0, cross_product_2D(rij/r, fij).z);
 }
 
-__device__ real3 tangential_frictional_force_ij(real kt, real3 &xi, real mu, real3 fn){
+__inline__ __device__ real3 tangential_frictional_force_ij(real kt, real3 &xi, real mu, real3 fn){
     if (kt == 0.0) return make_real3(0.0, 0.0, 0.0);
     real ft_magnitude = kt * length(xi);
     // real ft_magnitude = length(static_force_ij(kt, xi));
@@ -64,13 +64,13 @@ __device__ real3 tangential_frictional_force_ij(real kt, real3 &xi, real mu, rea
     return static_force_ij(kt, xi); 
 }
 
-__device__ real3 compute_stress_i(real3 rij, real3 fij){
+__inline__ __device__ real3 compute_stress_i(real3 rij, real3 fij){
     // Stress contribution from a pairwise interaction
     // printf("rij: %f, %f, %f | fij: %f, %f, %f\n", rij.x, rij.y, rij.z, fij.x, fij.y, fij.z);
     return make_real3( rij.x * fij.x, rij.y * fij.y, rij.z * fij.z );
 }
 
-__device__ real3 compute_stress_ij(
+__inline__ __device__ real3 compute_stress_ij(
   real3 rij, real3 force, int idx){
   if(idx > 2){ printf("Error: stress index out of bounds\n"); return make_real3(0.0, 0.0, 0.0); }
   if(idx==0){

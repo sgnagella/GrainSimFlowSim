@@ -5,6 +5,7 @@
 #include <utils/vector.cuh>
 #include <Interactor/Interactor.cuh>
 #include <Interactor/NeighbourList/CellList.cuh>
+#include "ExternalForcesStructs.cuh"
 #include "SimUtils.cuh"
 
 using namespace uammd;
@@ -28,29 +29,6 @@ struct ContactHistory {
     xi(make_real3(0,0,0)),
     contact_time(0.0), contact_age(0.0), is_active(false) {}
 };
-
-__device__ real3 total_contact_force_ij(
-    real kn, real kt, 
-    real gamma_n, 
-    real gamma_t,
-    real mu, real dt, 
-    real3 rij, real3 vij, 
-    ContactHistory* contact, real radius_sum){
-      if(( contact != nullptr) && ( contact->is_active)){
-        real3 fn = overlap_force_ij(kn, rij, radius_sum); 
-        // printf("Normal overlap force: %f, %f, %f\n", fn.x, fn.y, fn.z);
-        // fn += normal_frictional_force_ij(gamma_n, vij, rij);
-        fn -= damping_force_ij(gamma_n, vij, rij, true);
-        // printf("Normal frictional force: %f, %f, %f\n", fn.x, fn.y, fn.z);
-        // Update tangential displacement xi
-        real3 ft = tangential_frictional_force_ij(kt, contact->xi, mu, fn);
-        ft -= damping_force_ij(gamma_t, vij, rij, false);
-        // printf("tangential frictional force: %f, %f, %f\n\n", ft.x, ft.y, ft.z);
-        // real3 ft = make_real3(0,0,0);
-        return fn + ft; 
-      }
-      return make_real3(0,0,0);
-}
 
 struct ContactManager {
   ContactHistory* contacts;         // Array of contact histories
@@ -298,6 +276,29 @@ struct ContactManager {
   }
 };
 
+__inline__ __device__ real3 total_contact_force_ij(
+    real kn, real kt, 
+    real gamma_n, 
+    real gamma_t,
+    real mu, real dt, 
+    real3 rij, real3 vij, 
+    ContactHistory* contact, real radius_sum){
+      if(( contact != nullptr) && ( contact->is_active)){
+        real3 fn = overlap_force_ij(kn, rij, radius_sum); 
+        // printf("Normal overlap force: %f, %f, %f\n", fn.x, fn.y, fn.z);
+        // fn += normal_frictional_force_ij(gamma_n, vij, rij);
+        fn -= damping_force_ij(gamma_n, vij, rij, true);
+        // printf("Normal frictional force: %f, %f, %f\n", fn.x, fn.y, fn.z);
+        // Update tangential displacement xi
+        real3 ft = tangential_frictional_force_ij(kt, contact->xi, mu, fn);
+        ft -= damping_force_ij(gamma_t, vij, rij, false);
+        // printf("tangential frictional force: %f, %f, %f\n\n", ft.x, ft.y, ft.z);
+        // real3 ft = make_real3(0,0,0);
+        return fn + ft; 
+      }
+      return make_real3(0,0,0);
+}
+
 // __global__ void gpu_cleanupContacts(
 //   ContactManager *contact_mgr, // Contact history manager
 //   ContactManager::HashEntry *hash_table, // Hash table to update
@@ -389,7 +390,15 @@ struct ContactManager {
 
 //     // Inline destructor
 //     ~CustomContactInteractor() override; 
-//     virtual void updateSimulationTime(real newTime) override; 
+//     virtual void updateSimulationTime(real newTime) override;
+//     // ~CustomContactInteractor() override {
+//     //     if (d_contact_mgr) {
+//     //             cudaFree(d_contact_mgr);
+//     //             d_contact_mgr = nullptr;
+//     //         }
+//     // }
+
+//     // void updateSimulationTime(real newTime) override { time = newTime; }
 //     void h_cleanupContacts(cudaStream_t st);
 //     void sum(Computables comp, cudaStream_t stream) override;
 

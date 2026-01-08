@@ -70,21 +70,22 @@ struct ContactHistory {
     contact_time(0.0), contact_age(0), is_active(false) {}
 };
 
-__device__ real3 total_contact_force_ij(
-    real kn, real kt, 
-    real gamma_n, 
-    real mu, real dt, 
-    real3 rij, real3 vij, 
-    ContactHistory* contact){
-      if(( contact != nullptr) && ( contact->is_active)){
-        real3 fn = overlap_force_ij(kn, rij); 
-        fn += normal_frictional_force_ij(gamma_n, vij);
-        // Update tangential displacement xi
-        real3 ft = tangential_frictional_force_ij(kt, contact->xi, mu, fn);
-        return fn + ft; 
-      }
-      return make_real3(0,0,0);
-}
+// __device__ real3 total_contact_force_ij(
+//     real kn, real kt, 
+//     real gamma_n, 
+//     real mu, real dt, 
+//     real3 rij, real3 vij, 
+//     ContactHistory* contact){
+//       if(( contact != nullptr) && ( contact->is_active)){
+//         real3 fn = overlap_force_ij(kn, rij); 
+//         fn += normal_frictional_force_ij(gamma_n, vij);
+//         // Update tangential displacement xi
+//         real3 ft = tangential_frictional_force_ij(kt, contact->xi, mu, fn);
+//         return fn + ft; 
+//       }
+//       return make_real3(0,0,0);
+// }
+
 
 struct ContactManager {
   ContactHistory* contacts;         // Array of contact histories
