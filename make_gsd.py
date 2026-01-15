@@ -110,8 +110,8 @@ if __name__ == "__main__":
     box = [498.43841552734375, 502.14197, 0.0]
     Nparticles = 50498
     platePaticles = 249
-    dt = 0.0008; 0.001
-    Nsteps = int(2500*1250/1250)
+    dt = 0.0001; 0.0008; 0.001
+    Nsteps = int(5000)
     # Nsteps = int(312500/1250)
     # Nsteps = int(100000/1250)
     particle_groups = {"A": [0]*(platePaticles), "B": [1]*(platePaticles), "C": [2]*(Nparticles - 2*platePaticles)} ;  {"A": [0]*(Nparticles//2), "B": [1]*(Nparticles//2)}; {"A":[0]*Nparticles}; 
