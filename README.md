@@ -1,6 +1,6 @@
 # GPU-Accelerated DEM: Pressure-Driven Granular Flow Between Parallel Plates
 
-![Pressure-driven granular flow between parallel plates](ParallelPlatePressureFlow_HashSearch_LxdLy_2_F_0.001/renderings/pressure_flow_grains.gif)
+![Pressure-driven granular flow between parallel plates](renderings/pressure_flow_grains.gif)
 
 *Caption*
 
