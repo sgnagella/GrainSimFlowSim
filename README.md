@@ -3,7 +3,9 @@
 <p align="center">
   <img src="renderings/pressure_flow_grains.gif" alt="Pressure-driven granular flow between parallel plates">
   <br>
-  <em>Caption</em>
+  <em>Sample simulation output presenting steady flow of a densly packed, bidisperse mixture of disks. A constant force directed along the
+  length of the pipe is applied on all particles to model a maintained pressure drop. Rough pipe walls are modeled using particles that are strongly
+  held in-place using a harmonic trapping potential.</em>
 </p>
 
 A GPU-accelerated Discrete Element Method (DEM) simulation of 2D pressure-driven flow of a bidisperse dense granular packing confined between parallel plates. Grain dynamics are integrated using a modified [UAMMD](https://github.com/sgnagella/GrainSim) library (Newton–Euler integrator). Hysteretic contact forces (Luding 2008) are tracked via a custom GPU hash table with double-hashing and sequential probing, enabling nearly O(1) pair lookups and a ~100× speedup over naive linear search.
