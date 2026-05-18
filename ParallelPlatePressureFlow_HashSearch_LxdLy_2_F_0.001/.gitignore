@@ -1,0 +1,7 @@
+Makefile
+particles3.dat
+traj.gsd
+stress.dat
+analysis/
+Forces/
+hasher/
