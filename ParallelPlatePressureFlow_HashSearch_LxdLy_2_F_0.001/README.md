@@ -199,6 +199,44 @@ The hash table is initialised at 50% load factor (size = next power of two above
 
 ---
 
+## Global Memory Cleanup and Compaction
+
+Without periodic maintenance the `contacts[]` array fills with stale entries — pairs that separated long ago but whose slots were never reclaimed — and `contact_count` grows monotonically until the table overflows. A four-phase host routine `h_cleanupContacts()` runs every `cleanup_interval = 1/dt` steps (once per simulation time unit) to recover this memory.
+
+### Phase 1 — Eviction (`gpu_cleanupContacts`)
+
+One GPU thread per contact-array slot checks whether `contact_age < time` (i.e., the pair was not in contact during the most recent force evaluation). If so, the thread locates the corresponding hash-table entry by re-running the same double-hash probe sequence and atomically swaps it back to `EMPTY_PACKED` via `atomicCAS`. The slot is then marked `is_active = false`.
+
+```cuda
+if (contact->contact_age < time) {
+    // re-derive slot with hash1/hash2 ...
+    atomicCAS(&entry->packed, desired, EMPTY_PACKED);
+    contact->is_active = false;
+}
+```
+
+### Phase 2 — Compaction (Thrust `partition`)
+
+After eviction, the `contacts[]` array has gaps: active entries are interspersed with inactive ones. A Thrust `partition` on the device moves all active contacts to a dense prefix, eliminating the gaps without a full copy:
+
+```cuda
+auto new_end = thrust::partition(policy, d_begin, d_end,
+    [] __device__ (const ContactHistory& c) { return c.is_active; });
+int new_count = thrust::distance(d_begin, new_end);
+```
+
+### Phase 3 — Hash table rebuild (`gpu_rebuildHashTable`)
+
+Because compaction changes every contact's index within `contacts[]`, the hash table — which stores `(key, index)` pairs — is now stale. It is wiped to `EMPTY_PACKED` and rebuilt from scratch: one thread per compacted slot re-inserts its `(key, new_index)` pair using the same double-hash/CAS logic as `getContact_v1`.
+
+### Phase 4 — Counter reset
+
+`contact_count` is overwritten with `new_count` so subsequent `atomicAdd` allocations start from the correct high-water mark, and the `cleanup_count` diagnostic counter is zeroed for the next interval.
+
+Together these four phases bound memory growth: the occupied fraction of `contacts[]` after each cleanup reflects only the contacts that are geometrically active at that moment, keeping the hash table well below its overflow threshold for arbitrarily long runs.
+
+---
+
 ## Repository Structure
 
 ```
