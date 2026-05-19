@@ -3,8 +3,8 @@
 <p align="center">
   <img src="renderings/pressure_flow_grains.gif" alt="Pressure-driven granular flow between parallel plates">
   <br>
-  <em>Sample simulation output presenting steady flow of a densly packed, bidisperse mixture of disks. A constant force directed along the
-  length of the pipe is applied on all particles to model a maintained pressure drop. Rough pipe walls are modeled using particles that are strongly
+  <em>Sample simulation output presenting steady flow of a densly packed, bidisperse mixture of disks. A uniform force directed along the
+  length of the pipe is applied on all particles to model constant pressure drop. Rough pipe walls are modeled using particles that are strongly
   held in-place using a harmonic trapping potential.</em>
 </p>
 
